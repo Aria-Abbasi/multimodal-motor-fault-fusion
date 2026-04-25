@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "early-fault-fusion-paper"
+version = "0.1.0"
+description = "Reproducible scaffold for early fault detection research with vibration-current fusion"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

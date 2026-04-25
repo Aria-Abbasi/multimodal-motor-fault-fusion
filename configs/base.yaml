@@ -1,0 +1,49 @@
+project:
+  name: early-fault-fusion-paper
+  experiment_name: default_experiment
+
+runtime:
+  seed: 42
+  device: auto
+  num_workers: 4
+
+datasets:
+  main: nln_emp
+  robustness: paderborn
+  benchmark: cwru
+  modalities:
+    - vibration
+    - current
+  leakage_rule: recording_level_no_cross_split
+
+paths:
+  data_root: data
+  raw:
+    nln_emp: data/raw/nln_emp
+    paderborn: data/raw/paderborn
+    cwru: data/raw/cwru
+  interim: data/interim
+  processed: data/processed
+  metadata: data/metadata
+  splits: data/splits
+  artifacts_root: artifacts
+  checkpoints: artifacts/checkpoints
+  logs: artifacts/logs
+  results_root: results
+  runs: results/runs
+  tables: results/tables
+  figures: results/figures
+
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  max_epochs: 5
+
+evaluation:
+  metrics:
+    - macro_f1
+    - balanced_accuracy
+    - early_fault_recall
+    - auroc
+    - auprc
+    - mcc
