@@ -1,6 +1,6 @@
 project:
   name: early-fault-fusion-paper
-  experiment_name: default_experiment
+  experiment_name: multimodal-motor-fault-fusion
 
 runtime:
   seed: 42
