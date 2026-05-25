@@ -1,0 +1,72 @@
+Metadata master summary
+=======================
+Rows: 2802
+
+Dataset counts:
+dataset
+paderborn    2560
+nln_emp       232
+cwru           10
+
+Dataset x health label:
+health_label  fault  healthy
+dataset                     
+cwru              9        1
+nln_emp         194       38
+paderborn      2080      480
+
+Dataset x sensor type:
+sensor_type  current  multisensor  unknown  vibration
+dataset                                              
+cwru               0            0        0         10
+nln_emp          117            0        0        115
+paderborn          0         2559        1          0
+
+Sensor types present:
+sensor_types_present
+current|force|speed|temperature|torque|vibration    2559
+vibration                                            125
+current                                              117
+unknown                                                1
+
+Damage source counts:
+damage_source
+real            1120
+artificial       960
+healthy          481
+experimental     232
+seeded_fault       9
+
+Fault family counts:
+fault_family
+bearing_real_damage          1120
+bearing_artificial_damage     960
+healthy                       519
+misalignment                   26
+looseness_soft_foot            23
+bearing_ball                   21
+bearing_outer_race             21
+bearing_inner_race             20
+impeller_fault                 18
+unbalance                      18
+cavitation                     17
+stator_winding_fault           11
+coupling_fault                  8
+bearing_ball_spin               6
+bearing_contamination           6
+rotor_fault                     6
+bent_shaft                      2
+
+Readable counts:
+is_readable
+True     2801
+False       1
+
+Excluded from training:
+exclude_from_training
+False    2801
+True        1
+
+Severity unknown by dataset:
+dataset
+nln_emp    31

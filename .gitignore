@@ -2,8 +2,6 @@
 __pycache__/
 *.py[cod]
 *.so
-.pytest_cache/
-.mypy_cache/
 
 # Virtual environments
 .venv/
@@ -11,38 +9,20 @@ venv/
 
 # OS/editor
 .DS_Store
-.idea/
 .vscode/
 
-# Build artifacts
-build/
-dist/
-*.egg-info/
+# Ignore Model Weights and Logs
+artifacts/checkpoints/
+artifacts/logs/
+results/runs/
+*.pth
 
-# Logs and runtime artifacts
-artifacts/logs/*.log
-artifacts/checkpoints/*
-results/runs/*
-results/tables/*
-results/figures/*
+# Ignore heavy datasets and generated tensors
+data/raw/
+data/interim/
+data/processed/tensors/
+*.pt
 
-# Keep directory structure via .gitkeep
-!artifacts/logs/.gitkeep
-!artifacts/checkpoints/.gitkeep
-!results/runs/.gitkeep
-!results/tables/.gitkeep
-!results/figures/.gitkeep
-
-# Data: never commit raw datasets
-data/raw/**
-!data/raw/**/.gitkeep
-
-# Generated data (safe default: ignore contents, keep dirs)
-data/interim/**
-data/processed/**
-data/metadata/**
-data/splits/**
-!data/interim/.gitkeep
-!data/processed/.gitkeep
-!data/metadata/.gitkeep
-!data/splits/.gitkeep
+# Ignore large archives (like the one we just downloaded)
+*.zip
+*.tar.gz

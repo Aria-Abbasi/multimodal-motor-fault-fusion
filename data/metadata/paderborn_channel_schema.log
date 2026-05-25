@@ -1,0 +1,58 @@
+Inspected 100 / 2560 files
+Inspected 200 / 2560 files
+Inspected 300 / 2560 files
+Inspected 400 / 2560 files
+Inspected 500 / 2560 files
+Inspected 600 / 2560 files
+Inspected 700 / 2560 files
+Inspected 800 / 2560 files
+Inspected 900 / 2560 files
+Inspected 1000 / 2560 files
+Inspected 1100 / 2560 files
+Inspected 1200 / 2560 files
+Inspected 1300 / 2560 files
+Inspected 1400 / 2560 files
+Inspected 1500 / 2560 files
+Inspected 1600 / 2560 files
+Inspected 1700 / 2560 files
+Inspected 1800 / 2560 files
+Inspected 1900 / 2560 files
+Inspected 2000 / 2560 files
+Inspected 2100 / 2560 files
+Inspected 2200 / 2560 files
+Inspected 2300 / 2560 files
+Inspected 2400 / 2560 files
+Inspected 2500 / 2560 files
+Wrote: data/metadata/paderborn_channel_schema.csv
+Files inspected: 2560
+Channel rows: 17914
+
+Read errors:
+read_error
+OK                                  17913
+TypeError: Expecting matrix here        1
+
+Inferred sensor type counts:
+inferred_sensor_type
+current           5118
+vibration         5118
+force             2559
+speed             2559
+torque_or_load    2559
+unreadable           1
+
+Top channel names:
+channel_name
+force                    2559
+phase_current_1          2559
+phase_current_2          2559
+speed                    2559
+temp_2_bearing_module    2559
+torque                   2559
+vibration_1              2559
+                            1
+
+Top channel paths:
+channel_path
+Model Root/Einggangssignal    17913
+                                  1

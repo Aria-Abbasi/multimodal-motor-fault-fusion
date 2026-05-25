@@ -1,0 +1,11 @@
+recording_id,split,source_path,fault_family,health_label
+cwru_or021_6_1_239_vibration,train,data/raw/cwru/raw/OR021_6_1_239.mat,bearing_outer_race,fault
+cwru_b014_1_190_vibration,train,data/raw/cwru/raw/B014_1_190.mat,bearing_ball,fault
+cwru_ir021_1_214_vibration,train,data/raw/cwru/raw/IR021_1_214.mat,bearing_inner_race,fault
+cwru_b007_1_123_vibration,train,data/raw/cwru/raw/B007_1_123.mat,bearing_ball,fault
+cwru_or014_6_1_202_vibration,train,data/raw/cwru/raw/OR014_6_1_202.mat,bearing_outer_race,fault
+cwru_b021_1_227_vibration,train,data/raw/cwru/raw/B021_1_227.mat,bearing_ball,fault
+cwru_time_normal_1_098_vibration,train,data/raw/cwru/raw/Time_Normal_1_098.mat,healthy,healthy
+cwru_ir014_1_175_vibration,train,data/raw/cwru/raw/IR014_1_175.mat,bearing_inner_race,fault
+cwru_ir007_1_110_vibration,val,data/raw/cwru/raw/IR007_1_110.mat,bearing_inner_race,fault
+cwru_or007_6_1_136_vibration,test,data/raw/cwru/raw/OR007_6_1_136.mat,bearing_outer_race,fault
