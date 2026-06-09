@@ -49,32 +49,56 @@ pip install -r requirements.txt
 
 ## Core commands
 
-Training entry point (placeholder scaffold):
+Run one configured multimodal training job:
 
 ```bash
-python -m src.training.train --help
-python -m src.training.train \
-  --config configs/base.yaml \
-  --experiment-name smoke_train \
-  --seed 42 \
-  --output-dir artifacts
+python -m src.training.train_multimodal \
+  --processed-dir data/processed/nln_emp/nln_emp_leave_one_speed_out \
+  --dataset nln_emp \
+  --loss-name ce_2.0 \
+  --use-modality-gate \
+  --seed 42
 ```
 
-Evaluation entry point (placeholder scaffold):
+Run the full loss/gate matrix (12 configurations x 5 seeds):
 
 ```bash
-python -m src.evaluation.evaluate --help
-python -m src.evaluation.evaluate \
-  --config configs/base.yaml \
-  --experiment-name smoke_eval \
-  --seed 42 \
-  --output-dir results
+python -m src.training.experiment_runner \
+  --protocol nln_emp \
+  --output-file results/tables/loss_gate_matrix_results.csv
 ```
+
+Run the same matrix on the Paderborn artificial-to-natural protocol:
+
+```bash
+python -m src.training.experiment_runner \
+  --protocol paderborn_artificial_to_natural \
+  --output-file results/tables/paderborn_loss_gate_matrix_results.csv
+```
+
+Run NLN-EMP and then Paderborn in one process. The runner releases the
+NLN-EMP cache before loading Paderborn:
+
+```bash
+python -m src.training.experiment_runner \
+  --protocols nln_emp paderborn_artificial_to_natural \
+  --cache-max-gb 36 \
+  --output-file results/tables/loss_gate_matrix_results.csv
+```
+
+The runner resumes at seed level. Paderborn early-fault recall is reported as
+`N/A` when the test metadata has no granular severity labels.
 
 Run tests:
 
 ```bash
-pytest
+python -m pytest
+```
+
+For a CPU-only local environment, install PyTorch from its CPU wheel index:
+
+```bash
+python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
 ```
 
 ## Notes

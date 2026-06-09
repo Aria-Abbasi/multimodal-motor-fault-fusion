@@ -1,21 +1,51 @@
+"""Train the multimodal model with severity-aware curriculum learning."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+from dataclasses import dataclass
+import math
+import os
+import random
+import sys
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-import pandas as pd
-import numpy as np
-from pathlib import Path
 from tqdm import tqdm
-import argparse
-import random
-import os
-from sklearn.metrics import f1_score, accuracy_score, recall_score
 
-import sys
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from src.models.multimodal_cross_attention import MultimodalMotorModel
 
-def set_seed(seed: int):
+from src.evaluation.metrics import (  # noqa: E402
+    compute_binary_metrics,
+    format_optional_metric,
+    is_early_fault,
+)
+from src.models.multimodal_cross_attention import MultimodalMotorModel  # noqa: E402
+from src.training.losses import LOSS_NAMES, build_health_loss  # noqa: E402
+
+
+@dataclass
+class ProtocolTensorCache:
+    """Read-only CPU tensor cache shared by every run in one protocol."""
+
+    tensors: dict[str, torch.Tensor]
+    cached_splits: tuple[str, ...]
+    estimated_gb: float
+
+    def clear(self) -> None:
+        """Release references so Python can return the protocol cache memory."""
+        self.tensors.clear()
+
+
+def set_seed(seed: int) -> None:
+    """Set all random generators used by a training run."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -23,174 +53,649 @@ def set_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
+def seed_worker(worker_id: int) -> None:
+    """Seed each DataLoader worker from PyTorch's deterministic worker seed."""
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 class MultimodalDataset(Dataset):
-    def __init__(self, df, tensor_dir, preload=False):
-        self.df = df.reset_index(drop=True)
+    """Load cached two-channel spectrograms and their paper labels."""
+
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        tensor_dir: Path,
+        family_to_index: dict[str, int],
+        preload: bool = False,
+        shared_tensor_cache: Optional[Mapping[str, torch.Tensor]] = None,
+    ) -> None:
+        self.dataframe = dataframe.reset_index(drop=True)
         self.tensor_dir = Path(tensor_dir)
-        self.labels = [1 if 'fault' in str(l).lower() else 0 for l in self.df['health_label']]
-        self.families = [0] * len(self.df) 
-        self.severities = []
-        for _, row in self.df.iterrows():
-            if 'severity' in row and pd.notna(row['severity']):
-                self.severities.append(str(row['severity']))
-            else:
-                self.severities.append(str(row['health_label']))
-        self.preload = preload
-        self.tensors = []
-        if self.preload:
-            print(f"Loading {len(df)} tensors into System RAM for fast training...")
-            for idx in tqdm(range(len(df)), desc="Caching to RAM"):
-                t = torch.load(self.tensor_dir / self.df.iloc[idx]['tensor_id'], map_location='cpu', weights_only=True)
-                self.tensors.append(t)
+        self.family_to_index = family_to_index
+        self.shared_tensor_cache = shared_tensor_cache
+        self.health_labels = [
+            1 if "fault" in str(label).lower() else 0
+            for label in self.dataframe["health_label"]
+        ]
 
-    def __len__(self): return len(self.df)
-    def __getitem__(self, idx):
-        if self.preload: 
-            return self.tensors[idx], self.labels[idx], self.families[idx], self.severities[idx]
-        t = torch.load(self.tensor_dir / self.df.iloc[idx]['tensor_id'], map_location='cpu', weights_only=True)
-        return t, self.labels[idx], self.families[idx], self.severities[idx]
+        if "severity" in self.dataframe.columns:
+            severities = self.dataframe["severity"].fillna("").tolist()
+        else:
+            severities = [""] * len(self.dataframe)
+        self.early_fault_labels = [
+            is_early_fault(severity, health)
+            for severity, health in zip(
+                severities, self.dataframe["health_label"].tolist()
+            )
+        ]
 
-def train_multimodal(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"--- Running Step 10 Curriculum Pipeline on: {device} ---")
-    
-    index_df = pd.read_csv(Path(args.processed_dir) / "windows_index.csv")
-    tensor_dir = Path(args.processed_dir) / "tensors"
-    
-    if args.smoke_test:
-        train_full_df = index_df[index_df['split'] == 'train'].head(50)
-        test_full_df = index_df[index_df['split'] == 'test'].head(50)
-    else:
-        train_full_df = index_df[index_df['split'] == 'train']
-        test_full_df = index_df[index_df['split'] == 'test']
+        families = self.dataframe.get(
+            "fault_family", pd.Series(["unknown"] * len(self.dataframe))
+        )
+        self.family_labels = [
+            family_to_index.get(str(family), 0) for family in families
+        ]
 
-    model = MultimodalMotorModel(num_fault_families=5, ablation_mode=args.ablation).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    criterion_health = nn.CrossEntropyLoss()
-    criterion_family = nn.CrossEntropyLoss()
+        self.tensors: Optional[list[torch.Tensor]] = None
+        if preload:
+            print(f"Loading {len(self.dataframe)} tensors into system RAM...")
+            self.tensors = [
+                torch.load(
+                    self.tensor_dir / tensor_id,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                for tensor_id in tqdm(
+                    self.dataframe["tensor_id"], desc="Caching tensors"
+                )
+            ]
 
-    # --- STAGE 1 ---
-    print("\n" + "="*40)
-    print("🎓 STAGE 1: General Pre-training (All Severities)")
-    print("="*40)
-    train_dataset = MultimodalDataset(train_full_df, tensor_dir, preload=not args.smoke_test)
-    loader_kwargs = {'batch_size': 16 if args.smoke_test else 128, 'shuffle': True}
-    if not args.smoke_test:
-        loader_kwargs.update({'num_workers': 2, 'pin_memory': True})
-    train_loader = DataLoader(train_dataset, **loader_kwargs)
-    
-    model.train()
-    stage1_epochs = 1 if args.smoke_test else 10
-    for epoch in range(stage1_epochs):
-        total_loss = 0
-        for batch_x, batch_health, batch_family, _ in train_loader:
-            batch_x, batch_health, batch_family = batch_x.to(device), batch_health.to(device), batch_family.to(device)
-            optimizer.zero_grad()
-            out_health, out_family = model(batch_x)
-            loss = criterion_health(out_health, batch_health) + (0.5 * criterion_family(out_family, batch_family))
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        
-        # ADDED THE LOG BACK HERE
-        print(f"Stage 1 - Epoch {epoch+1}/{stage1_epochs} | Loss: {total_loss/len(train_loader):.4f}")
+    def __len__(self) -> int:
+        return len(self.dataframe)
 
-    # --- STAGE 2 ---
-    if args.use_curriculum:
-        print("\n" + "="*40)
-        print("🔬 STAGE 2: Weighted Fine-Tuning (Early Fault Focus)")
-        print("="*40)
-        criterion_weighted = nn.CrossEntropyLoss(reduction='none')
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = 0.0001
-        model.train()
-        stage2_epochs = 1 if args.smoke_test else 5
-        for epoch in range(stage2_epochs):
-            total_loss = 0
-            for batch_x, batch_health, batch_family, batch_sev in train_loader:
-                batch_x, batch_health, batch_family = batch_x.to(device), batch_health.to(device), batch_family.to(device)
-                optimizer.zero_grad()
-                out_health, out_family = model(batch_x)
-                raw_loss_h = criterion_weighted(out_health, batch_health)
-                weights = torch.tensor([5.0 if (s == '1' or s in ['01', '05', '07'] or '007' in s or '0.007' in s or 'early' in s.lower()) else 1.0 for s in batch_sev]).to(device)
-                loss_h = (raw_loss_h * weights).mean()
-                loss_f = criterion_family(out_family, batch_family)
-                loss = loss_h + (0.5 * loss_f)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-            
-            # ADDED THE LOG BACK HERE
-            print(f"Stage 2 - Epoch {epoch+1}/{stage2_epochs} | Weighted Loss: {total_loss/len(train_loader):.4f}")
+    def __getitem__(
+        self, index: int
+    ) -> tuple[torch.Tensor, int, int, bool]:
+        tensor_id = str(self.dataframe.iloc[index]["tensor_id"])
+        if self.shared_tensor_cache is not None and tensor_id in self.shared_tensor_cache:
+            tensor = self.shared_tensor_cache[tensor_id]
+        elif self.tensors is None:
+            tensor = torch.load(
+                self.tensor_dir / tensor_id,
+                map_location="cpu",
+                weights_only=True,
+            )
+        else:
+            tensor = self.tensors[index]
+        return (
+            tensor,
+            self.health_labels[index],
+            self.family_labels[index],
+            self.early_fault_labels[index],
+        )
 
-    # --- EVALUATION AND SAVING BLOCK (NEW) ---
-    print("\n🔬 Grading the Model on the Test Set...")
+
+def select_index_splits(
+    index_dataframe: pd.DataFrame, smoke_test: bool
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Select train, validation, and test rows consistently for cache and training."""
+    train_dataframe = index_dataframe[index_dataframe["split"] == "train"]
+    validation_dataframe = index_dataframe[index_dataframe["split"] == "val"]
+    test_dataframe = index_dataframe[index_dataframe["split"] == "test"]
+    if min(len(train_dataframe), len(test_dataframe)) == 0:
+        raise ValueError("Both train and test splits must contain samples")
+
+    if smoke_test:
+        train_dataframe = train_dataframe.head(64)
+        validation_dataframe = validation_dataframe.head(64)
+        test_dataframe = test_dataframe.head(64)
+    return train_dataframe, validation_dataframe, test_dataframe
+
+
+def load_protocol_tensor_cache(
+    processed_dir: Path,
+    maximum_cache_gb: float = 36.0,
+    smoke_test: bool = False,
+) -> ProtocolTensorCache:
+    """Cache complete splits in RAM once, prioritizing train then val then test."""
+    processed_dir = Path(processed_dir)
+    index_path = processed_dir / "windows_index.csv"
+    tensor_dir = processed_dir / "tensors"
+    if not index_path.exists():
+        raise FileNotFoundError(f"Window index not found: {index_path}")
+    if not tensor_dir.exists():
+        raise FileNotFoundError(f"Tensor directory not found: {tensor_dir}")
+    if maximum_cache_gb <= 0:
+        return ProtocolTensorCache({}, (), 0.0)
+
+    index_dataframe = pd.read_csv(index_path)
+    split_frames = dict(
+        zip(
+            ("train", "val", "test"),
+            select_index_splits(index_dataframe, smoke_test),
+        )
+    )
+    first_non_empty = next(
+        (frame for frame in split_frames.values() if len(frame)), None
+    )
+    if first_non_empty is None:
+        raise ValueError("No tensors are available to cache")
+
+    sample_id = str(first_non_empty.iloc[0]["tensor_id"])
+    sample = torch.load(
+        tensor_dir / sample_id, map_location="cpu", weights_only=True
+    )
+    bytes_per_tensor = sample.numel() * sample.element_size()
+
+    maximum_bytes = int(maximum_cache_gb * (1024**3))
+    selected_splits: list[str] = []
+    estimated_bytes = 0
+    for split_name in ("train", "val", "test"):
+        split_bytes = len(split_frames[split_name]) * bytes_per_tensor
+        if estimated_bytes + split_bytes <= maximum_bytes:
+            selected_splits.append(split_name)
+            estimated_bytes += split_bytes
+        else:
+            print(
+                f"RAM cache: leaving {split_name} disk-backed "
+                f"(estimated {split_bytes / (1024**3):.2f} GB)"
+            )
+
+    if "train" not in selected_splits:
+        raise MemoryError(
+            f"Training split needs about "
+            f"{len(split_frames['train']) * bytes_per_tensor / (1024**3):.2f} GB, "
+            f"above --cache-max-gb={maximum_cache_gb:.2f}"
+        )
+
+    rows_to_cache = pd.concat(
+        [split_frames[name] for name in selected_splits], ignore_index=True
+    )
+    tensors: dict[str, torch.Tensor] = {sample_id: sample}
+    print(
+        f"Caching {len(rows_to_cache)} tensors once for splits "
+        f"{selected_splits} (estimated {estimated_bytes / (1024**3):.2f} GB)..."
+    )
+    for tensor_id in tqdm(rows_to_cache["tensor_id"], desc="Protocol RAM cache"):
+        key = str(tensor_id)
+        if key not in tensors:
+            tensors[key] = torch.load(
+                tensor_dir / key, map_location="cpu", weights_only=True
+            )
+
+    return ProtocolTensorCache(
+        tensors=tensors,
+        cached_splits=tuple(selected_splits),
+        estimated_gb=estimated_bytes / (1024**3),
+    )
+
+
+def build_family_mapping(train_dataframe: pd.DataFrame) -> dict[str, int]:
+    """Create a stable auxiliary-label mapping from training metadata only."""
+    if "fault_family" not in train_dataframe.columns:
+        return {"unknown": 0}
+    families = sorted(
+        {
+            str(value)
+            for value in train_dataframe["fault_family"].dropna().tolist()
+            if str(value).strip() and str(value).strip().lower() != "unknown"
+        }
+    )
+    return {"unknown": 0, **{family: index + 1 for index, family in enumerate(families)}}
+
+
+def build_warmup_cosine_scheduler(
+    optimizer: optim.Optimizer,
+    total_steps: int,
+    warmup_ratio: float,
+    minimum_learning_rate_ratio: float,
+) -> optim.lr_scheduler.LambdaLR:
+    """Create a linear-warmup then cosine-decay learning-rate scheduler."""
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+    warmup_steps = max(1, int(total_steps * warmup_ratio))
+
+    def learning_rate_multiplier(step: int) -> float:
+        if step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+        if total_steps == warmup_steps:
+            return minimum_learning_rate_ratio
+        progress = min(
+            1.0, (step - warmup_steps) / float(total_steps - warmup_steps)
+        )
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return minimum_learning_rate_ratio + (
+            (1.0 - minimum_learning_rate_ratio) * cosine
+        )
+
+    return optim.lr_scheduler.LambdaLR(optimizer, learning_rate_multiplier)
+
+
+def make_loader(
+    dataset: Dataset,
+    batch_size: int,
+    shuffle: bool,
+    seed: int,
+    num_workers: int,
+    pin_memory: bool,
+) -> DataLoader:
+    """Build a deterministic DataLoader."""
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        worker_init_fn=seed_worker if num_workers else None,
+        generator=generator,
+        persistent_workers=num_workers > 0,
+    )
+
+
+def evaluate_model(
+    model: MultimodalMotorModel,
+    data_loader: DataLoader,
+    device: torch.device,
+    amp_enabled: bool,
+) -> dict[str, Any]:
+    """Evaluate all binary paper metrics and optional gate statistics."""
     model.eval()
-    test_dataset = MultimodalDataset(test_full_df, tensor_dir, preload=False)
-    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-    
-    all_preds = []
-    all_targets = []
-    all_sevs = []
-    
+    targets: list[int] = []
+    predictions: list[int] = []
+    probabilities: list[float] = []
+    early_mask: list[bool] = []
+    gate_values: list[float] = []
+
     with torch.no_grad():
-        for batch_x, batch_health, _, batch_sev in test_loader:
-            batch_x = batch_x.to(device)
-            out_health, _ = model(batch_x)
-            preds = torch.argmax(out_health, dim=1).cpu().numpy()
-            all_preds.extend(preds)
-            all_targets.extend(batch_health.numpy())
-            all_sevs.extend(batch_sev)
-            
-    macro_f1 = f1_score(all_targets, all_preds, average='macro')
-    acc = accuracy_score(all_targets, all_preds)
-    
-    # Early fault recall calculation
-    early_indices = [i for i, s in enumerate(all_sevs) if s == '1' or s in ['01', '05', '07'] or '007' in s or '0.007' in s or 'early' in s.lower()]
-    if len(early_indices) > 0:
-        early_targets = [all_targets[i] for i in early_indices]
-        early_preds = [all_preds[i] for i in early_indices]
-        early_recall = recall_score(early_targets, early_preds, zero_division=0)
+        for batch_x, batch_health, _, batch_early in data_loader:
+            batch_x = batch_x.to(device, non_blocking=True)
+            with torch.autocast(
+                device_type=device.type, dtype=torch.float16, enabled=amp_enabled
+            ):
+                health_logits, _ = model(batch_x)
+            fault_probability = torch.softmax(health_logits.float(), dim=1)[:, 1]
+            batch_predictions = health_logits.argmax(dim=1)
+
+            targets.extend(batch_health.numpy().tolist())
+            predictions.extend(batch_predictions.cpu().numpy().tolist())
+            probabilities.extend(fault_probability.cpu().numpy().tolist())
+            early_mask.extend(batch_early.numpy().astype(bool).tolist())
+            if model.last_current_gate is not None:
+                gate_values.extend(
+                    model.last_current_gate.flatten().cpu().numpy().tolist()
+                )
+
+    metrics = compute_binary_metrics(
+        targets,
+        predictions,
+        fault_probabilities=probabilities,
+        early_fault_mask=early_mask,
+    )
+    metrics["current_gate_mean"] = (
+        float(np.mean(gate_values)) if gate_values else float("nan")
+    )
+    metrics["current_gate_std"] = (
+        float(np.std(gate_values)) if gate_values else float("nan")
+    )
+    return metrics
+
+
+def train_one_epoch(
+    model: MultimodalMotorModel,
+    data_loader: DataLoader,
+    optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler.LRScheduler,
+    stage_health_loss: Optional[nn.Module],
+    family_loss: nn.Module,
+    family_loss_weight: float,
+    gradient_clip_norm: float,
+    scaler: Any,
+    device: torch.device,
+    amp_enabled: bool,
+) -> tuple[float, float]:
+    """Train one epoch and return mean loss and maximum observed gradient norm."""
+    model.train()
+    running_loss = 0.0
+    maximum_gradient_norm = 0.0
+
+    for batch_x, batch_health, batch_family, batch_early in data_loader:
+        batch_x = batch_x.to(device, non_blocking=True)
+        batch_health = batch_health.to(device, non_blocking=True)
+        batch_family = batch_family.to(device, non_blocking=True)
+        batch_early = batch_early.to(device, non_blocking=True)
+        optimizer.zero_grad(set_to_none=True)
+
+        with torch.autocast(
+            device_type=device.type, dtype=torch.float16, enabled=amp_enabled
+        ):
+            health_logits, family_logits = model(batch_x)
+            if stage_health_loss is None:
+                health_loss = nn.functional.cross_entropy(
+                    health_logits, batch_health
+                )
+            else:
+                health_loss = stage_health_loss(
+                    health_logits, batch_health, batch_early
+                )
+            auxiliary_loss = family_loss(family_logits, batch_family)
+            loss = health_loss + family_loss_weight * auxiliary_loss
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), max_norm=gradient_clip_norm
+        )
+        maximum_gradient_norm = max(
+            maximum_gradient_norm, float(gradient_norm.detach().cpu())
+        )
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+        running_loss += float(loss.detach().cpu())
+
+    return running_loss / max(1, len(data_loader)), maximum_gradient_norm
+
+
+def append_result_csv(result: dict[str, Any], output_path: Path) -> None:
+    """Append a result while safely expanding an older CSV schema."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    new_row = pd.DataFrame([result])
+    if output_path.exists():
+        existing = pd.read_csv(output_path)
+        combined = pd.concat([existing, new_row], ignore_index=True, sort=False)
     else:
-        early_recall = 0.0
+        combined = new_row
+    temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    combined.to_csv(temporary_path, index=False, na_rep="N/A")
+    temporary_path.replace(output_path)
 
-    print(f"📊 Test Macro F1: {macro_f1:.4f} | Early Recall: {early_recall:.4f}")
 
-    # Save to dedicated CSV
-    import uuid
-    run_hash = str(uuid.uuid4())[:6]
-    ablation_str = args.ablation if args.ablation else "fusion"
-    
-    metrics_file = Path("results/tables/detailed_metrics.csv")
-    metrics_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    new_row = pd.DataFrame([{
-        "run_id": run_hash,
-        "ablation": ablation_str,
-        "curriculum": args.use_curriculum,
-        "macro_f1": macro_f1,
-        "balanced_acc": acc,
-        "early_fault_recall": early_recall
-    }])
-    
-    if metrics_file.exists():
-        new_row.to_csv(metrics_file, mode='a', header=False, index=False)
+def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
+    """Execute one configured training run and return its test metrics."""
+    seed = int(getattr(args, "seed", 42))
+    set_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    amp_enabled = bool(getattr(args, "amp", True) and device.type == "cuda")
+
+    processed_dir = Path(args.processed_dir)
+    index_path = processed_dir / "windows_index.csv"
+    tensor_dir = processed_dir / "tensors"
+    if not index_path.exists():
+        raise FileNotFoundError(f"Window index not found: {index_path}")
+    if not tensor_dir.exists():
+        raise FileNotFoundError(f"Tensor directory not found: {tensor_dir}")
+
+    smoke_test = bool(getattr(args, "smoke_test", False))
+    index_dataframe = pd.read_csv(index_path)
+    train_dataframe, validation_dataframe, test_dataframe = select_index_splits(
+        index_dataframe, smoke_test
+    )
+
+    family_to_index = build_family_mapping(train_dataframe)
+    use_gate = bool(getattr(args, "use_modality_gate", False))
+    model = MultimodalMotorModel(
+        num_fault_families=len(family_to_index),
+        ablation_mode=getattr(args, "ablation", None),
+        use_modality_gate=use_gate,
+    ).to(device)
+
+    batch_size = int(getattr(args, "batch_size", 128))
+    if smoke_test:
+        batch_size = min(batch_size, 16)
+    num_workers = int(getattr(args, "num_workers", 2)) if not smoke_test else 0
+    preload = bool(getattr(args, "preload", not smoke_test))
+    shared_cache = getattr(args, "shared_tensor_cache", None)
+    shared_tensors = shared_cache.tensors if shared_cache is not None else None
+
+    train_dataset = MultimodalDataset(
+        train_dataframe,
+        tensor_dir,
+        family_to_index,
+        preload=preload and shared_tensors is None,
+        shared_tensor_cache=shared_tensors,
+    )
+    validation_dataset = MultimodalDataset(
+        validation_dataframe,
+        tensor_dir,
+        family_to_index,
+        preload=False,
+        shared_tensor_cache=shared_tensors,
+    )
+    test_dataset = MultimodalDataset(
+        test_dataframe,
+        tensor_dir,
+        family_to_index,
+        preload=False,
+        shared_tensor_cache=shared_tensors,
+    )
+    train_loader = make_loader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        seed=seed,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    validation_loader = (
+        make_loader(
+            validation_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            seed=seed,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+        )
+        if len(validation_dataset)
+        else None
+    )
+    test_loader = make_loader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        seed=seed,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+    )
+
+    stage1_epochs = 1 if smoke_test else int(getattr(args, "stage1_epochs", 10))
+    stage2_epochs = (
+        1
+        if smoke_test and getattr(args, "use_curriculum", True)
+        else int(getattr(args, "stage2_epochs", 5))
+    )
+    if not bool(getattr(args, "use_curriculum", True)):
+        stage2_epochs = 0
+
+    learning_rate = float(getattr(args, "learning_rate", 1e-3))
+    minimum_learning_rate = float(getattr(args, "minimum_learning_rate", 1e-5))
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=float(getattr(args, "weight_decay", 1e-4)),
+    )
+    total_steps = len(train_loader) * (stage1_epochs + stage2_epochs)
+    scheduler = build_warmup_cosine_scheduler(
+        optimizer,
+        total_steps=total_steps,
+        warmup_ratio=float(getattr(args, "warmup_ratio", 0.1)),
+        minimum_learning_rate_ratio=minimum_learning_rate / learning_rate,
+    )
+    if hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     else:
-        new_row.to_csv(metrics_file, mode='w', header=True, index=False)
+        scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    family_loss = nn.CrossEntropyLoss()
+    configured_health_loss = build_health_loss(args.loss_name)
 
-    # Save the actual model
-    ckpt_dir = Path("artifacts/checkpoints")
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"model_{ablation_str}_curr{args.use_curriculum}_{run_hash}.pth"
-    torch.save({"state_dict": model.state_dict(), "metrics": {"macro_f1": macro_f1}}, ckpt_path)
-    
-    print("✅ Run Complete. Metrics and Checkpoint Saved!")
+    print(
+        f"Training on {device} | seed={seed} | loss={args.loss_name} | "
+        f"gate={use_gate} | AdamW decay={getattr(args, 'weight_decay', 1e-4)}"
+    )
+
+    best_state = copy.deepcopy(model.state_dict())
+    best_validation_f1 = -math.inf
+    history: list[dict[str, Any]] = []
+    total_epochs = stage1_epochs + stage2_epochs
+    for epoch in range(total_epochs):
+        in_stage_two = epoch >= stage1_epochs
+        stage_name = "stage2_early_focus" if in_stage_two else "stage1_general"
+        active_health_loss = configured_health_loss if in_stage_two else None
+        epoch_loss, maximum_gradient_norm = train_one_epoch(
+            model=model,
+            data_loader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            stage_health_loss=active_health_loss,
+            family_loss=family_loss,
+            family_loss_weight=float(getattr(args, "family_loss_weight", 0.5)),
+            gradient_clip_norm=float(getattr(args, "gradient_clip_norm", 1.0)),
+            scaler=scaler,
+            device=device,
+            amp_enabled=amp_enabled,
+        )
+
+        validation_f1 = float("nan")
+        if validation_loader is not None:
+            validation_metrics = evaluate_model(
+                model, validation_loader, device, amp_enabled
+            )
+            validation_f1 = validation_metrics["macro_f1"]
+            if validation_f1 > best_validation_f1:
+                best_validation_f1 = validation_f1
+                best_state = copy.deepcopy(model.state_dict())
+        else:
+            best_state = copy.deepcopy(model.state_dict())
+
+        current_lr = optimizer.param_groups[0]["lr"]
+        history.append(
+            {
+                "epoch": epoch + 1,
+                "stage": stage_name,
+                "loss": epoch_loss,
+                "validation_macro_f1": validation_f1,
+                "learning_rate": current_lr,
+                "maximum_gradient_norm_before_clip": maximum_gradient_norm,
+            }
+        )
+        print(
+            f"{stage_name} epoch {epoch + 1}/{total_epochs} | "
+            f"loss={epoch_loss:.4f} | val_f1={format_optional_metric(validation_f1)} "
+            f"| lr={current_lr:.7f} | grad_norm={maximum_gradient_norm:.3f}"
+        )
+
+    model.load_state_dict(best_state)
+    test_metrics = evaluate_model(model, test_loader, device, amp_enabled)
+    ablation = getattr(args, "ablation", None) or "fusion"
+    run_id = str(
+        getattr(
+            args,
+            "run_id",
+            f"{getattr(args, 'dataset', 'dataset')}_{ablation}_{args.loss_name}_"
+            f"gate{int(use_gate)}_seed{seed}",
+        )
+    )
+    result = {
+        "run_id": run_id,
+        "experiment": getattr(args, "experiment", run_id),
+        "dataset": getattr(args, "dataset", "unknown"),
+        "processed_dir": str(processed_dir),
+        "seed": seed,
+        "ablation": ablation,
+        "curriculum": bool(getattr(args, "use_curriculum", True)),
+        "loss_name": args.loss_name,
+        "modality_gate": use_gate,
+        "stage1_epochs": stage1_epochs,
+        "stage2_epochs": stage2_epochs,
+        "learning_rate": learning_rate,
+        "weight_decay": float(getattr(args, "weight_decay", 1e-4)),
+        "gradient_clip_norm": float(getattr(args, "gradient_clip_norm", 1.0)),
+        "warmup_ratio": float(getattr(args, "warmup_ratio", 0.1)),
+        "shared_cache_splits": (
+            ",".join(shared_cache.cached_splits) if shared_cache is not None else ""
+        ),
+        "shared_cache_estimated_gb": (
+            shared_cache.estimated_gb if shared_cache is not None else 0.0
+        ),
+        **test_metrics,
+    }
+
+    checkpoint_dir = Path(
+        getattr(args, "checkpoint_dir", "artifacts/checkpoints/loss_gate_matrix")
+    )
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_dir / f"{run_id}.pth"
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "metrics": test_metrics,
+            "history": history,
+            "family_to_index": family_to_index,
+            "model_config": {
+                "num_fault_families": len(family_to_index),
+                "ablation_mode": getattr(args, "ablation", None),
+                "use_modality_gate": use_gate,
+            },
+            "training_config": result,
+        },
+        checkpoint_path,
+    )
+    result["checkpoint_path"] = str(checkpoint_path)
+
+    if bool(getattr(args, "write_detailed_metrics", True)):
+        append_result_csv(
+            result,
+            Path(getattr(args, "metrics_file", "results/tables/detailed_metrics.csv")),
+        )
+
+    print(
+        f"Test Macro F1={result['macro_f1']:.4f} | "
+        f"Balanced Acc={result['balanced_acc']:.4f} | "
+        f"Early Recall={format_optional_metric(result['early_fault_recall'])}"
+    )
+    return result
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--processed-dir", required=True)
+    parser.add_argument("--dataset", default="nln_emp")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--loss-name", choices=LOSS_NAMES, default="ce_1.0")
+    parser.add_argument("--use-modality-gate", action="store_true")
+    parser.add_argument(
+        "--use-curriculum", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--ablation", choices=["vibration_only", "current_only"], default=None
+    )
+    parser.add_argument("--stage1-epochs", type=int, default=10)
+    parser.add_argument("--stage2-epochs", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--minimum-learning-rate", type=float, default=1e-5)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
+    parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument("--family-loss-weight", type=float, default=0.5)
+    parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument(
+        "--checkpoint-dir",
+        default="artifacts/checkpoints/loss_gate_matrix",
+    )
+    parser.add_argument(
+        "--metrics-file", default="results/tables/detailed_metrics.csv"
+    )
+    return parser
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--processed_dir", type=str, required=True)
-    parser.add_argument("--use_curriculum", action="store_true")
-    parser.add_argument("--ablation", type=str, default=None, choices=["vibration_only", "current_only"])
-    parser.add_argument("--smoke_test", action="store_true")
-    os.environ['PYTHONPATH'] = str(Path(__file__).resolve().parents[2])
-    train_multimodal(parser.parse_args())
+    os.environ["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+    train_multimodal(build_parser().parse_args())

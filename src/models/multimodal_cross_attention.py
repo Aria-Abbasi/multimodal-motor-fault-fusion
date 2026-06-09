@@ -1,131 +1,189 @@
+"""Multimodal vibration-current cross-attention model."""
+
+from __future__ import annotations
+
+import time
+from typing import Optional
+
 import torch
 import torch.nn as nn
-import time
+
 
 class SpectrogramEncoder(nn.Module):
-    """Single-modality encoder: 4 Conv blocks -> Global Pool -> 256d"""
-    def __init__(self, in_channels=1, embed_dim=256):
+    """Encode one 128x128 spectrogram into a compact embedding."""
+
+    def __init__(self, in_channels: int = 1, embed_dim: int = 256) -> None:
         super().__init__()
-        
-        def conv_block(in_c, out_c):
+
+        def conv_block(in_features: int, out_features: int) -> nn.Sequential:
             return nn.Sequential(
-                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
-                nn.BatchNorm2d(out_c),
-                nn.GELU(), # Modern activation
-                nn.MaxPool2d(2)
+                nn.Conv2d(in_features, out_features, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_features),
+                nn.GELU(),
+                nn.MaxPool2d(2),
             )
-            
-        # Input: (Batch, 1, 128, 128)
+
         self.features = nn.Sequential(
-            conv_block(in_channels, 32),   # -> (B, 32, 64, 64)
-            conv_block(32, 64),            # -> (B, 64, 32, 32)
-            conv_block(64, 128),           # -> (B, 128, 16, 16)
-            conv_block(128, 256)           # -> (B, 256, 8, 8)
+            conv_block(in_channels, 32),
+            conv_block(32, 64),
+            conv_block(64, 128),
+            conv_block(128, 256),
         )
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.projection = nn.Linear(256, embed_dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
-        x = self.global_pool(x).view(x.size(0), -1)
+        x = self.global_pool(x).flatten(1)
         return self.projection(x)
 
-class CrossAttentionFusion(nn.Module):
-    """Fuses modalities using 4-head MultiheadAttention"""
-    def __init__(self, embed_dim=256, num_heads=4, dropout=0.1):
+
+class DynamicCurrentGate(nn.Module):
+    """Predict a sample-wise current-signal volume in the range [0, 1]."""
+
+    def __init__(self, embed_dim: int = 256) -> None:
         super().__init__()
-        # Vib attends to Curr
-        self.attn_v_c = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        # Curr attends to Vib
-        self.attn_c_v = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        hidden_dim = max(32, embed_dim // 2)
+        self.network = nn.Sequential(
+            nn.LayerNorm(embed_dim * 2),
+            nn.Linear(embed_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),
+        )
+
+        # Start near 0.8, preserving current information while still allowing
+        # the network to quickly turn it down when vibration is sufficient.
+        final_linear = self.network[-2]
+        nn.init.zeros_(final_linear.weight)
+        nn.init.constant_(final_linear.bias, 1.38629436112)
+
+    def forward(
+        self, vibration_embedding: torch.Tensor, current_embedding: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        gate = self.network(torch.cat([vibration_embedding, current_embedding], dim=-1))
+        return current_embedding * gate, gate
+
+
+class CrossAttentionFusion(nn.Module):
+    """Fuse vibration and current embeddings with bidirectional attention."""
+
+    def __init__(
+        self, embed_dim: int = 256, num_heads: int = 4, dropout: float = 0.1
+    ) -> None:
+        super().__init__()
+        self.attn_v_c = nn.MultiheadAttention(
+            embed_dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.attn_c_v = nn.MultiheadAttention(
+            embed_dim, num_heads, dropout=dropout, batch_first=True
+        )
         self.norm = nn.LayerNorm(embed_dim * 2)
 
-    def forward(self, vib_emb, curr_emb):
-        # Reshape to (Batch, SeqLen=1, EmbedDim) for attention
-        v_seq = vib_emb.unsqueeze(1)
-        c_seq = curr_emb.unsqueeze(1)
-        
-        # Cross Attention Lookups
-        v_fused, _ = self.attn_v_c(query=v_seq, key=c_seq, value=c_seq)
-        c_fused, _ = self.attn_c_v(query=c_seq, key=v_seq, value=v_seq)
-        
-        # Concat and flatten back to (Batch, 512)
-        fused = torch.cat([v_fused.squeeze(1), c_fused.squeeze(1)], dim=-1)
+    def forward(
+        self, vibration_embedding: torch.Tensor, current_embedding: torch.Tensor
+    ) -> torch.Tensor:
+        vibration_sequence = vibration_embedding.unsqueeze(1)
+        current_sequence = current_embedding.unsqueeze(1)
+
+        vibration_fused, _ = self.attn_v_c(
+            query=vibration_sequence,
+            key=current_sequence,
+            value=current_sequence,
+            need_weights=False,
+        )
+        current_fused, _ = self.attn_c_v(
+            query=current_sequence,
+            key=vibration_sequence,
+            value=vibration_sequence,
+            need_weights=False,
+        )
+
+        fused = torch.cat(
+            [vibration_fused.squeeze(1), current_fused.squeeze(1)], dim=-1
+        )
         return self.norm(fused)
 
+
 class MultimodalMotorModel(nn.Module):
-    """The full proposed model with ablation flags and dual-heads"""
-    def __init__(self, embed_dim=256, num_fault_families=5, ablation_mode=None):
+    """Cross-attention model with optional dynamic current gating."""
+
+    def __init__(
+        self,
+        embed_dim: int = 256,
+        num_fault_families: int = 5,
+        ablation_mode: Optional[str] = None,
+        use_modality_gate: bool = False,
+    ) -> None:
         super().__init__()
-        self.ablation_mode = ablation_mode # None, "vibration_only", "current_only"
-        
+        if ablation_mode not in {None, "vibration_only", "current_only"}:
+            raise ValueError(f"Unsupported ablation mode: {ablation_mode}")
+
+        self.ablation_mode = ablation_mode
+        self.use_modality_gate = use_modality_gate and ablation_mode is None
+        self.last_current_gate: Optional[torch.Tensor] = None
+
         self.vib_encoder = SpectrogramEncoder(in_channels=1, embed_dim=embed_dim)
         self.curr_encoder = SpectrogramEncoder(in_channels=1, embed_dim=embed_dim)
-        
+        self.current_gate = (
+            DynamicCurrentGate(embed_dim=embed_dim) if self.use_modality_gate else None
+        )
         self.fusion = CrossAttentionFusion(embed_dim=embed_dim, num_heads=4)
-        
-        # Dual outputs: Early-Fault (Binary) and Fault Family (Multi-class)
+
         fusion_dim = embed_dim * 2 if ablation_mode is None else embed_dim
-        
         self.head_early_fault = nn.Sequential(
             nn.Linear(fusion_dim, 128),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(128, 2) # 0: Healthy, 1: Faulty
+            nn.Linear(128, 2),
         )
-        
         self.head_fault_family = nn.Sequential(
             nn.Linear(fusion_dim, 128),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(128, num_fault_families)
+            nn.Linear(128, num_fault_families),
         )
 
-    def forward(self, x):
-        # Input x shape: (Batch, Channels=2, Freq=128, Time=128)
-        # Channel 0: Vibration, Channel 1: Current
-        vib_signal = x[:, 0:1, :, :]
-        curr_signal = x[:, 1:2, :, :]
-        
-        if self.ablation_mode == "vibration_only":
-            features = self.vib_encoder(vib_signal)
-        elif self.ablation_mode == "current_only":
-            features = self.curr_encoder(curr_signal)
-        else: # Full Multimodal Fusion
-            v_emb = self.vib_encoder(vib_signal)
-            c_emb = self.curr_encoder(curr_signal)
-            features = self.fusion(v_emb, c_emb)
-            
-        out_health = self.head_early_fault(features)
-        out_family = self.head_fault_family(features)
-        
-        return out_health, out_family
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        vibration_signal = x[:, 0:1, :, :]
+        current_signal = x[:, 1:2, :, :]
+        self.last_current_gate = None
 
-# --- Smoke Test & Shape Validation ---
+        if self.ablation_mode == "vibration_only":
+            features = self.vib_encoder(vibration_signal)
+        elif self.ablation_mode == "current_only":
+            features = self.curr_encoder(current_signal)
+        else:
+            vibration_embedding = self.vib_encoder(vibration_signal)
+            current_embedding = self.curr_encoder(current_signal)
+            if self.current_gate is not None:
+                current_embedding, gate = self.current_gate(
+                    vibration_embedding, current_embedding
+                )
+                self.last_current_gate = gate.detach()
+            features = self.fusion(vibration_embedding, current_embedding)
+
+        return self.head_early_fault(features), self.head_fault_family(features)
+
+
 if __name__ == "__main__":
-    print("🚀 Running Step 9 Architecture Smoke Test...")
-    
-    # Simulate a batch of 8 windows, 2 channels, 128x128 spectrograms
     batch_size = 8
     dummy_input = torch.randn(batch_size, 2, 128, 128)
-    
-    # Test 1: Full Fusion Model
-    print("\n--- Testing Full Multimodal Fusion ---")
-    model = MultimodalMotorModel(num_fault_families=5)
-    
-    start_time = time.time()
-    # Test standard forward pass
-    out_health, out_family = model(dummy_input)
-        
-    print(f"Input Shape:  {dummy_input.shape}")
-    print(f"Health Head:  {out_health.shape} (Expected: {batch_size}, 2)")
-    print(f"Family Head:  {out_family.shape} (Expected: {batch_size}, 5)")
-    print(f"Forward Pass: {(time.time() - start_time)*1000:.2f} ms")
-    
-    # Test 2: Ablation Mode (Vibration Only)
-    print("\n--- Testing Ablation (Vibration Only) ---")
-    model_vib = MultimodalMotorModel(ablation_mode="vibration_only")
-    out_health_v, _ = model_vib(dummy_input)
-    print(f"Ablated Health Head Shape: {out_health_v.shape}")
-    
-    print("\n✅ Step 9 Architecture is mathematically sound and ready for training!")
+
+    for gate_enabled in (False, True):
+        model = MultimodalMotorModel(
+            num_fault_families=5, use_modality_gate=gate_enabled
+        )
+        start_time = time.time()
+        health_output, family_output = model(dummy_input)
+        elapsed_ms = (time.time() - start_time) * 1000
+        gate_mean = (
+            model.last_current_gate.mean().item()
+            if model.last_current_gate is not None
+            else None
+        )
+        print(
+            f"gate={gate_enabled} health={tuple(health_output.shape)} "
+            f"family={tuple(family_output.shape)} gate_mean={gate_mean} "
+            f"forward_ms={elapsed_ms:.2f}"
+        )

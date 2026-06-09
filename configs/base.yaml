@@ -35,9 +35,27 @@ paths:
   figures: results/figures
 
 training:
-  batch_size: 32
+  batch_size: 128
   learning_rate: 0.001
-  max_epochs: 5
+  minimum_learning_rate: 0.00001
+  stage1_epochs: 10
+  stage2_epochs: 5
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  warmup_ratio: 0.1
+  family_loss_weight: 0.5
+  amp: true
+  preload: true
+  loss_grid:
+    - ce_1.0
+    - ce_1.5
+    - ce_2.0
+    - ce_3.0
+    - ce_4.0
+    - dynamic_focal
+  modality_gate_grid:
+    - false
+    - true
 
 evaluation:
   metrics:
