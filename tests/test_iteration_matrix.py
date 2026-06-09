@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import pytest
+import argparse
 
 pytest.importorskip("pandas")
 
-from src.training.experiment_runner import build_experiment_matrix, build_parser
+from src.training.experiment_runner import (
+    build_experiment_matrix,
+    build_parser,
+    run_protocol_matrix,
+)
 
 
 def test_matrix_contains_six_losses_with_and_without_gate() -> None:
@@ -41,3 +46,17 @@ def test_runner_accepts_sequential_protocols() -> None:
         "paderborn_artificial_to_natural",
     ]
     assert args.cache_max_gb == 36.0
+
+
+def test_paderborn_rejects_early_weight_grid(tmp_path) -> None:
+    args = argparse.Namespace(
+        protocol="paderborn_artificial_to_natural",
+        data_root=str(tmp_path),
+        output_file=str(tmp_path / "results.csv"),
+        seeds=[42],
+        smoke_test=True,
+        losses=["ce_2.0"],
+    )
+
+    with pytest.raises(ValueError, match="no granular severity labels"):
+        run_protocol_matrix(args, "paderborn_artificial_to_natural")

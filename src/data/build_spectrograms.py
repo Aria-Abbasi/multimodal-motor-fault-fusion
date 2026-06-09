@@ -14,13 +14,27 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 from .signal_io import load_recording_signals
+from .preprocessing_config import (
+    SPECTROGRAM_SIZE,
+    STFT_NOVERLAP,
+    STFT_NPERSEG,
+    WINDOW_OVERLAP,
+    WINDOW_SIZE,
+)
 import argparse
 
-def compute_stft_spectrogram(signal: np.ndarray, target_size=(128, 128)) -> torch.Tensor:
+def compute_stft_spectrogram(
+    signal: np.ndarray, target_size=SPECTROGRAM_SIZE
+) -> torch.Tensor:
     """Computes STFT, converts to log-magnitude, and resizes to target shape."""
     # Add tiny noise to prevent log(0) issues
     signal = signal + np.random.normal(0, 1e-8, len(signal))
-    f, t, Zxx = scipy.signal.stft(signal, window='hann', nperseg=256, noverlap=128)
+    _, _, Zxx = scipy.signal.stft(
+        signal,
+        window="hann",
+        nperseg=STFT_NPERSEG,
+        noverlap=STFT_NOVERLAP,
+    )
     log_spec = np.log(np.abs(Zxx) + 1e-8)
     
     # Convert to torch and resize using bilinear interpolation
@@ -34,6 +48,11 @@ def main():
     parser.add_argument("--config", type=str, default="configs/base.yaml")
     parser.add_argument("--split_file", type=str, required=True)
     parser.add_argument("--dataset", type=str, required=True)
+    parser.add_argument(
+        "--fold-id",
+        type=str,
+        help="Required when the split CSV contains more than one fold.",
+    )
     args = parser.parse_args()
 
     # Load configuration for output paths
@@ -62,6 +81,19 @@ def main():
     
     # 3. Filter for the requested dataset
     df = df[df['dataset'] == args.dataset.lower()]
+    if "fold_id" in df.columns:
+        fold_ids = sorted(df["fold_id"].dropna().astype(str).unique())
+        if args.fold_id:
+            if args.fold_id not in fold_ids:
+                raise ValueError(
+                    f"Unknown fold '{args.fold_id}'. Available folds: {fold_ids}"
+                )
+            df = df[df["fold_id"].astype(str) == args.fold_id].copy()
+        elif len(fold_ids) > 1:
+            raise ValueError(
+                "Split file contains multiple folds. Pass --fold-id with one of: "
+                + ", ".join(fold_ids)
+            )
 
     print(f"\n--- Processing {args.dataset} | Protocol: {Path(args.split_file).stem} ---")
     print(f"Total recordings in split file: {len(df)}")
@@ -72,8 +104,8 @@ def main():
     print(f"Split distribution: {df['split'].value_counts().to_dict()}")
 
     # Signal slicing parameters
-    window_size = 4096
-    overlap = 0.5
+    window_size = WINDOW_SIZE
+    overlap = WINDOW_OVERLAP
     step_size = int(window_size * (1 - overlap))
 
     # ==========================================
@@ -154,7 +186,12 @@ def main():
                     'tensor_id': tensor_filename,
                     'recording_id': row['recording_id'],
                     'split': row['split'],
+                    'dataset': row.get('dataset', args.dataset.lower()),
+                    'fold_id': row.get('fold_id', args.fold_id or ''),
                     'fault_family': row.get('fault_family', 'unknown'),
+                    'severity': row.get('severity', 'unknown'),
+                    'damage_source': row.get('damage_source', 'unknown'),
+                    'original_label': row.get('original_label', 'unknown'),
                     'health_label': row.get('health_label', 'unknown')
                 })
 

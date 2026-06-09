@@ -76,6 +76,10 @@ python -m src.training.experiment_runner \
   --output-file results/tables/paderborn_loss_gate_matrix_results.csv
 ```
 
+Because Paderborn bearing IDs are not severity annotations, Paderborn runs use
+standard cross-entropy only. The runner evaluates gate off/on across five
+seeds (10 jobs per Paderborn protocol) and reports early-fault recall as `N/A`.
+
 Run NLN-EMP and then Paderborn in one process. The runner releases the
 NLN-EMP cache before loading Paderborn:
 

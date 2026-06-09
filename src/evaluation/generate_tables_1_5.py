@@ -1,5 +1,6 @@
 import torch
 import time
+import pandas as pd
 from pathlib import Path
 import sys
 
@@ -33,32 +34,53 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Generate Table 1 (Dataset Summary) ---
-    table1_latex = """\\begin{table}[h]
+    metadata = pd.read_csv("data/metadata/metadata_master.csv")
+
+    def fault_family_count(dataset):
+        subset = metadata[
+            (metadata["dataset"] == dataset)
+            & (metadata["health_label"].astype(str).str.lower() == "fault")
+        ]
+        return subset["fault_family"].nunique()
+
+    nln_families = fault_family_count("nln_emp")
+    paderborn_families = fault_family_count("paderborn")
+    cwru_families = fault_family_count("cwru")
+
+    table1_latex = f"""\\begin{{table}}[h]
 \\centering
-\\caption{Summary of Evaluated Motor Fault Datasets}
-\\label{tab:datasets}
-\\begin{tabular}{lcccc}
+\\caption{{Summary of Evaluated Motor Fault Datasets}}
+\\label{{tab:datasets}}
+\\begin{{tabular}}{{lccc}}
 \\hline
-\\textbf{Dataset} & \\textbf{Available Sensors} & \\textbf{Fault Families} & \\textbf{Generalization Protocol} \\\\
+\\textbf{{Dataset}} & \\textbf{{Available Sensors}} & \\textbf{{Fault Families}} & \\textbf{{Generalization Protocol}} \\\\
 \\hline
-NLN-EMP & Vibration, Current & 5 & Leave-One-Speed-Out \\\\
-Paderborn (PU) & Vibration, Current & 3 & Artificial to Natural \\\\
-CWRU & Vibration Only & 4 & Leave-One-Load-Out \\\\
+NLN-EMP & Vibration, Current & {nln_families} & Leave-One-Speed-Out \\\\
+Paderborn (PU) & Vibration, Current & {paderborn_families} & Artificial to Natural \\\\
+CWRU & Vibration Only & {cwru_families} & Leave-One-Load-Out \\\\
 \\hline
-\\end{tabular}
-\\end{table}
+\\end{{tabular}}
+\\end{{table}}
 """
     with open(out_dir / 'table1_datasets.tex', 'w') as f:
         f.write(table1_latex)
 
     # --- Generate Table 5 (Complexity) ---
     # Create dummy tensors for 1 sample (1 channel, 4096 sequence length typical for windows)
-    dummy_input = torch.randn(1, 2, 64, 64)
+    dummy_input = torch.randn(1, 2, 128, 128)
     
     models = {
-        "Fusion (Proposed)": MultimodalMotorModel(num_fault_families=5, ablation_mode=None),
-        "Vibration Only (1D)": MultimodalMotorModel(num_fault_families=5, ablation_mode="vibration_only"),
-        "Current Only (1D)": MultimodalMotorModel(num_fault_families=5, ablation_mode="current_only")
+        "Fusion (Proposed)": MultimodalMotorModel(
+            num_fault_families=nln_families + 1, ablation_mode=None
+        ),
+        "Vibration Only": MultimodalMotorModel(
+            num_fault_families=nln_families + 1,
+            ablation_mode="vibration_only",
+        ),
+        "Current Only": MultimodalMotorModel(
+            num_fault_families=nln_families + 1,
+            ablation_mode="current_only",
+        ),
     }
 
     table5_latex = """\\begin{table}[h]

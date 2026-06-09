@@ -17,7 +17,7 @@ from src.evaluation.metrics import (
 
 def test_early_recall_is_na_when_paderborn_has_no_severity_labels() -> None:
     early_mask = [
-        is_early_fault("", health)
+        is_early_fault("", health, "paderborn")
         for health in ("healthy", "fault", "fault", "healthy")
     ]
     metrics = compute_binary_metrics(
@@ -35,7 +35,7 @@ def test_early_recall_is_na_when_paderborn_has_no_severity_labels() -> None:
 
 def test_nln_severity_one_has_valid_early_recall() -> None:
     early_mask = [
-        is_early_fault(severity, health)
+        is_early_fault(severity, health, "nln_emp")
         for severity, health in ((0, "healthy"), (1, "fault"), (1, "fault"), (2, "fault"))
     ]
     metrics = compute_binary_metrics(
@@ -47,3 +47,14 @@ def test_nln_severity_one_has_valid_early_recall() -> None:
     assert metrics["early_fault_support"] == 2
     assert metrics["early_fault_recall"] == pytest.approx(0.5)
     assert metrics["balanced_acc"] != metrics["accuracy"]
+
+
+def test_paderborn_bearing_ids_are_not_severity_labels() -> None:
+    for bearing_id in ("01", "05", "07", "16", "30"):
+        assert not is_early_fault(bearing_id, "fault", "paderborn")
+
+
+def test_cwru_smallest_defect_is_early() -> None:
+    assert is_early_fault("007", "fault", "cwru")
+    assert is_early_fault("0.007", "fault", "cwru")
+    assert not is_early_fault("014", "fault", "cwru")

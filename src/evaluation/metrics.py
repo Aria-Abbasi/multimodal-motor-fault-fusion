@@ -16,39 +16,34 @@ from sklearn.metrics import (
 
 
 MISSING_SEVERITY_TOKENS = {"", "nan", "none", "null", "unknown", "n/a", "na"}
-EARLY_SEVERITY_TOKENS = {
-    "1",
-    "01",
-    "early",
-    "early_fault",
-    "lowest",
-    "low",
-    "05",
-    "07",
-    "0.007",
-    "007",
+EXPLICIT_EARLY_TOKENS = {"early", "early_fault", "lowest", "low"}
+DATASET_EARLY_SEVERITY_TOKENS = {
+    "nln_emp": {"1", "1.0"},
+    "cwru": {"007", "0.007"},
 }
 
 
-def is_early_fault(severity: Any, health_label: Any) -> bool:
-    """Return whether a row explicitly represents an early fault."""
+def is_early_fault(
+    severity: Any, health_label: Any, dataset: Any = None
+) -> bool:
+    """Return whether a row is an early fault under its dataset's label schema."""
     if "fault" not in str(health_label).strip().lower():
         return False
 
     token = str(severity).strip().lower()
     if token in MISSING_SEVERITY_TOKENS:
         return False
-    if token in EARLY_SEVERITY_TOKENS or "early" in token:
+    if token in EXPLICIT_EARLY_TOKENS or "early" in token:
         return True
 
-    try:
-        return math.isclose(float(token), 1.0)
-    except ValueError:
-        return False
+    dataset_name = str(dataset).strip().lower()
+    return token in DATASET_EARLY_SEVERITY_TOKENS.get(dataset_name, set())
 
 
-def severity_is_available(severity: Any) -> bool:
+def severity_is_available(severity: Any, dataset: Any = None) -> bool:
     """Return whether a sample has a usable granular severity annotation."""
+    if str(dataset).strip().lower() == "paderborn":
+        return False
     return str(severity).strip().lower() not in MISSING_SEVERITY_TOKENS
 
 

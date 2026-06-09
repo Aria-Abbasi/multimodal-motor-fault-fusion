@@ -9,11 +9,10 @@ import sys
 
 # Ensure local imports work
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from src.models.multimodal_cross_attention import MultimodalMotorModel
+from src.evaluation.checkpoint import load_model_from_checkpoint
 
 def main():
-    print("🎨 Generating Figure 3: TRUE 5x5 Fault Family Confusion Matrix...")
-    print("⚠️  NOTE: This requires a model trained without the 'families=[0]' bug!")
+    print("Generating checkpoint-aligned fault-family confusion matrix...")
     device = torch.device("cpu")
     
     ckpt_dir = Path("artifacts/checkpoints")
@@ -30,33 +29,22 @@ def main():
     df = pd.read_csv(index_path)
     test_df = df[df['split'] == 'test'].reset_index(drop=True)
     
-    possible_cols = ['label', 'fault_family', 'health_label', 'condition']
-    label_col = next((col for col in possible_cols if col in test_df.columns), None)
-    
-    if not label_col:
+    if "fault_family" not in test_df.columns:
         print("❌ Could not find the fault family column in your CSV.")
         return
 
-    # --- THE FIX: Map the 10 raw strings into the 5 Model Families ---
-    family_mapping = {
-        'Healthy': 0,
-        'Bearing Ball': 1,
-        'Bearing Ball Spin': 1,
-        'Bearing Contamination': 1,
-        'Bearing Inner Race': 1,
-        'Bearing Outer Race': 1,
-        'Rotor Fault': 2,
-        'Looseness Soft Foot': 2, # Often grouped with rotor/mechanical looseness
-        'Stator Winding Fault': 3,
-        'Impeller Fault': 4
-    }
-    family_names = ['Healthy', 'Bearing Fault', 'Rotor/Looseness', 'Stator Fault', 'Impeller Fault']
-
-    # Initialize model EXACTLY as it was trained (5 classes)
-    model = MultimodalMotorModel(num_fault_families=5, ablation_mode=None).to(device)
-    state = torch.load(best_ckpt, map_location=device)
-    model.load_state_dict(state["state_dict"])
-    model.eval()
+    model, checkpoint = load_model_from_checkpoint(best_ckpt, device)
+    family_mapping = checkpoint.get("family_to_index")
+    if not family_mapping:
+        raise ValueError(
+            "Checkpoint has no family_to_index mapping; regenerate it with the "
+            "current trainer before producing a family confusion matrix."
+        )
+    inverse_mapping = {index: name for name, index in family_mapping.items()}
+    family_names = [
+        inverse_mapping.get(index, f"class_{index}")
+        for index in range(len(inverse_mapping))
+    ]
     
     print(f"Evaluating {len(test_df)} samples on the 5-Class Diagnostic Head...")
     y_true = []
@@ -70,14 +58,14 @@ def main():
             _, out_family = model(x)
             pred_family = torch.argmax(out_family, dim=1).item()
             
-            # Map the specific string to its 0-4 parent category
-            raw_str = str(test_df.iloc[idx][label_col])
-            true_family = family_mapping.get(raw_str, 0) # Default to 0 if unknown
+            raw_family = str(test_df.iloc[idx]["fault_family"])
+            true_family = family_mapping.get(raw_family, 0)
             
             y_true.append(true_family)
             y_pred.append(pred_family)
 
-    cm = confusion_matrix(y_true, y_pred)
+    labels = list(range(len(family_names)))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
     
     plt.style.use('seaborn-v0_8-paper')
     sns.set_context("paper", font_scale=1.2)

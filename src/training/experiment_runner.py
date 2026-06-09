@@ -105,7 +105,21 @@ def run_protocol_matrix(args: argparse.Namespace, protocol: str) -> None:
     if args.smoke_test:
         seeds = seeds[:1]
 
-    selected_losses = tuple(args.losses) if args.losses else LOSS_NAMES
+    requested_losses = tuple(args.losses) if args.losses else LOSS_NAMES
+    if protocol_config["dataset"] == "paderborn":
+        unsupported = set(requested_losses) - {"ce_1.0"}
+        if args.losses and unsupported:
+            raise ValueError(
+                "Paderborn has no granular severity labels, so early-weight "
+                "losses are not identifiable. Use --losses ce_1.0."
+            )
+        selected_losses = ("ce_1.0",)
+        print(
+            "Paderborn uses standard CE only; its bearing IDs are not severity "
+            "labels. Gate off/on will still be evaluated."
+        )
+    else:
+        selected_losses = requested_losses
     experiments = build_experiment_matrix(selected_losses)
     processed_dir = Path(args.data_root) / protocol_config["folder"]
     total_jobs = len(experiments) * len(seeds)
@@ -173,6 +187,7 @@ def run_protocol_matrix(args: argparse.Namespace, protocol: str) -> None:
                     minimum_learning_rate=args.minimum_learning_rate,
                     weight_decay=args.weight_decay,
                     gradient_clip_norm=args.gradient_clip_norm,
+                    modality_dropout=getattr(args, "modality_dropout", 0.2),
                     warmup_ratio=args.warmup_ratio,
                     family_loss_weight=args.family_loss_weight,
                     preload=False,
@@ -251,6 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
+    parser.add_argument("--modality-dropout", type=float, default=0.2)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--family-loss-weight", type=float, default=0.5)
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)

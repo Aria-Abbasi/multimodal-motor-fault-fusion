@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from src.models.multimodal_cross_attention import MultimodalMotorModel
+from src.evaluation.checkpoint import load_model_from_checkpoint
 
 def normalize_heatmap(grad):
     heatmap = np.abs(grad)
@@ -41,8 +41,7 @@ def main():
     test_df = pd.read_csv(index_path)
     test_df = test_df[test_df['split'] == 'test'].reset_index(drop=True)
 
-    model = MultimodalMotorModel(num_fault_families=5, ablation_mode=None).to(device)
-    model.load_state_dict(torch.load(best_ckpt, map_location=device)["state_dict"])
+    model, _ = load_model_from_checkpoint(best_ckpt, device)
     
     out_dir = Path("results/figures")
     out_dir.mkdir(parents=True, exist_ok=True)

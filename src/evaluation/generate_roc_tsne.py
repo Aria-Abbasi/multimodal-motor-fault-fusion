@@ -10,7 +10,7 @@ from sklearn.metrics import roc_curve, auc
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from src.models.multimodal_cross_attention import MultimodalMotorModel
+from src.evaluation.checkpoint import load_model_from_checkpoint
 
 def main():
     print("📈 Generating Figure 4 (ROC) and Figure 6 (t-SNE) using ALL samples...")
@@ -30,10 +30,7 @@ def main():
     df = pd.read_csv(index_path)
     test_df = df[df['split'] == 'test'].reset_index(drop=True)
     
-    model = MultimodalMotorModel(num_fault_families=5, ablation_mode=None).to(device)
-    state = torch.load(best_ckpt, map_location=device)
-    model.load_state_dict(state["state_dict"])
-    model.eval()
+    model, _ = load_model_from_checkpoint(best_ckpt, device)
     
     print(f"Loading FULL {len(test_df)} test samples. This will take ~15 seconds...")
     

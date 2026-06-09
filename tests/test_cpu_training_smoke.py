@@ -13,6 +13,7 @@ pytest.importorskip("sklearn")
 
 from src.training.train_multimodal import (
     load_protocol_tensor_cache,
+    select_curriculum_stage_two_rows,
     train_multimodal,
 )
 
@@ -61,7 +62,7 @@ def test_cpu_training_pipeline_end_to_end(tmp_path: Path) -> None:
     result = train_multimodal(
         argparse.Namespace(
             processed_dir=str(data_dir),
-            dataset="synthetic",
+            dataset="nln_emp",
             seed=42,
             loss_name="dynamic_focal",
             use_modality_gate=True,
@@ -75,6 +76,7 @@ def test_cpu_training_pipeline_end_to_end(tmp_path: Path) -> None:
             minimum_learning_rate=1e-5,
             weight_decay=1e-4,
             gradient_clip_norm=1.0,
+            modality_dropout=0.2,
             warmup_ratio=0.1,
             family_loss_weight=0.5,
             preload=False,
@@ -88,12 +90,31 @@ def test_cpu_training_pipeline_end_to_end(tmp_path: Path) -> None:
         )
     )
 
-    assert result["dataset"] == "synthetic"
+    assert result["dataset"] == "nln_emp"
     assert result["modality_gate"] is True
     assert result["loss_name"] == "dynamic_focal"
     assert 0.0 <= result["macro_f1"] <= 1.0
     assert Path(result["checkpoint_path"]).exists()
     assert metrics_path.exists()
+
+
+def test_stage_two_contains_only_healthy_and_early_faults(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "synthetic"
+    build_synthetic_dataset(data_dir)
+    dataframe = pd.read_csv(data_dir / "windows_index.csv")
+    later_fault = dataframe.iloc[[1]].copy()
+    later_fault["severity"] = "2"
+    dataframe = pd.concat([dataframe, later_fault], ignore_index=True)
+
+    stage_two = select_curriculum_stage_two_rows(dataframe, "nln_emp")
+
+    assert not (
+        (stage_two["health_label"] == "fault")
+        & (stage_two["severity"].astype(str) == "2")
+    ).any()
+    assert (stage_two["severity"].astype(str) == "1").any()
 
 
 def test_shared_protocol_cache_prevents_per_run_disk_loads(
@@ -114,7 +135,7 @@ def test_shared_protocol_cache_prevents_per_run_disk_loads(
     result = train_multimodal(
         argparse.Namespace(
             processed_dir=str(data_dir),
-            dataset="synthetic",
+            dataset="nln_emp",
             seed=42,
             loss_name="ce_1.0",
             use_modality_gate=False,
@@ -126,6 +147,7 @@ def test_shared_protocol_cache_prevents_per_run_disk_loads(
             minimum_learning_rate=1e-5,
             weight_decay=1e-4,
             gradient_clip_norm=1.0,
+            modality_dropout=0.2,
             warmup_ratio=0.1,
             family_loss_weight=0.5,
             preload=False,

@@ -9,10 +9,17 @@ import torch
 import torch.nn as nn
 
 
+MODEL_EMBED_DIM = 256
+MODEL_ATTENTION_HEADS = 4
+MODEL_DROPOUT = 0.1
+
+
 class SpectrogramEncoder(nn.Module):
     """Encode one 128x128 spectrogram into a compact embedding."""
 
-    def __init__(self, in_channels: int = 1, embed_dim: int = 256) -> None:
+    def __init__(
+        self, in_channels: int = 1, embed_dim: int = MODEL_EMBED_DIM
+    ) -> None:
         super().__init__()
 
         def conv_block(in_features: int, out_features: int) -> nn.Sequential:
@@ -41,7 +48,7 @@ class SpectrogramEncoder(nn.Module):
 class DynamicCurrentGate(nn.Module):
     """Predict a sample-wise current-signal volume in the range [0, 1]."""
 
-    def __init__(self, embed_dim: int = 256) -> None:
+    def __init__(self, embed_dim: int = MODEL_EMBED_DIM) -> None:
         super().__init__()
         hidden_dim = max(32, embed_dim // 2)
         self.network = nn.Sequential(
@@ -69,7 +76,10 @@ class CrossAttentionFusion(nn.Module):
     """Fuse vibration and current embeddings with bidirectional attention."""
 
     def __init__(
-        self, embed_dim: int = 256, num_heads: int = 4, dropout: float = 0.1
+        self,
+        embed_dim: int = MODEL_EMBED_DIM,
+        num_heads: int = MODEL_ATTENTION_HEADS,
+        dropout: float = MODEL_DROPOUT,
     ) -> None:
         super().__init__()
         self.attn_v_c = nn.MultiheadAttention(
@@ -110,14 +120,20 @@ class MultimodalMotorModel(nn.Module):
 
     def __init__(
         self,
-        embed_dim: int = 256,
+        embed_dim: int = MODEL_EMBED_DIM,
         num_fault_families: int = 5,
         ablation_mode: Optional[str] = None,
         use_modality_gate: bool = False,
+        num_attention_heads: int = MODEL_ATTENTION_HEADS,
+        dropout: float = MODEL_DROPOUT,
     ) -> None:
         super().__init__()
         if ablation_mode not in {None, "vibration_only", "current_only"}:
             raise ValueError(f"Unsupported ablation mode: {ablation_mode}")
+        if embed_dim % num_attention_heads != 0:
+            raise ValueError("embed_dim must be divisible by num_attention_heads")
+        if not 0 <= dropout < 1:
+            raise ValueError("dropout must be in [0, 1)")
 
         self.ablation_mode = ablation_mode
         self.use_modality_gate = use_modality_gate and ablation_mode is None
@@ -128,19 +144,26 @@ class MultimodalMotorModel(nn.Module):
         self.current_gate = (
             DynamicCurrentGate(embed_dim=embed_dim) if self.use_modality_gate else None
         )
-        self.fusion = CrossAttentionFusion(embed_dim=embed_dim, num_heads=4)
+        self.embed_dim = embed_dim
+        self.num_attention_heads = num_attention_heads
+        self.dropout = dropout
+        self.fusion = CrossAttentionFusion(
+            embed_dim=embed_dim,
+            num_heads=num_attention_heads,
+            dropout=dropout,
+        )
 
         fusion_dim = embed_dim * 2 if ablation_mode is None else embed_dim
         self.head_early_fault = nn.Sequential(
             nn.Linear(fusion_dim, 128),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(128, 2),
         )
         self.head_fault_family = nn.Sequential(
             nn.Linear(fusion_dim, 128),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(128, num_fault_families),
         )
 

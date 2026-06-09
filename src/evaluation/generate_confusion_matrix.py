@@ -9,7 +9,7 @@ import sys
 
 # Ensure local imports work
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from src.models.multimodal_cross_attention import MultimodalMotorModel
+from src.evaluation.checkpoint import load_model_from_checkpoint
 
 def main():
     print("🎨 Generating Figure 3: Confusion Matrix...")
@@ -32,10 +32,7 @@ def main():
     test_df = df[df['split'] == 'test'].reset_index(drop=True)
     
     # 3. Initialize Model and Load Weights
-    model = MultimodalMotorModel(num_fault_families=5, ablation_mode=None).to(device)
-    state = torch.load(best_ckpt, map_location=device)
-    model.load_state_dict(state["state_dict"])
-    model.eval()
+    model, _ = load_model_from_checkpoint(best_ckpt, device)
     
     print(f"Loading {len(test_df)} test samples. This will take ~10-20 seconds on CPU...")
     

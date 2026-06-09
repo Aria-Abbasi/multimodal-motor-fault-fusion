@@ -31,6 +31,9 @@ from src.models.multimodal_cross_attention import MultimodalMotorModel  # noqa: 
 from src.training.losses import LOSS_NAMES, build_health_loss  # noqa: E402
 
 
+DEFAULT_MODALITY_DROPOUT = 0.2
+
+
 @dataclass
 class ProtocolTensorCache:
     """Read-only CPU tensor cache shared by every run in one protocol."""
@@ -71,11 +74,13 @@ class MultimodalDataset(Dataset):
         family_to_index: dict[str, int],
         preload: bool = False,
         shared_tensor_cache: Optional[Mapping[str, torch.Tensor]] = None,
+        dataset_name: Optional[str] = None,
     ) -> None:
         self.dataframe = dataframe.reset_index(drop=True)
         self.tensor_dir = Path(tensor_dir)
         self.family_to_index = family_to_index
         self.shared_tensor_cache = shared_tensor_cache
+        self.dataset_name = dataset_name
         self.health_labels = [
             1 if "fault" in str(label).lower() else 0
             for label in self.dataframe["health_label"]
@@ -86,7 +91,7 @@ class MultimodalDataset(Dataset):
         else:
             severities = [""] * len(self.dataframe)
         self.early_fault_labels = [
-            is_early_fault(severity, health)
+            is_early_fault(severity, health, self.dataset_name)
             for severity, health in zip(
                 severities, self.dataframe["health_label"].tolist()
             )
@@ -247,6 +252,30 @@ def build_family_mapping(train_dataframe: pd.DataFrame) -> dict[str, int]:
     return {"unknown": 0, **{family: index + 1 for index, family in enumerate(families)}}
 
 
+def select_curriculum_stage_two_rows(
+    train_dataframe: pd.DataFrame, dataset_name: str
+) -> pd.DataFrame:
+    """Keep healthy samples and explicitly annotated lowest-severity faults."""
+    if "severity" not in train_dataframe.columns:
+        return train_dataframe.iloc[0:0].copy()
+
+    early_mask = pd.Series(
+        [
+            is_early_fault(severity, health, dataset_name)
+            for severity, health in zip(
+                train_dataframe["severity"].fillna(""),
+                train_dataframe["health_label"],
+            )
+        ],
+        index=train_dataframe.index,
+    )
+    healthy_mask = (
+        train_dataframe["health_label"].astype(str).str.strip().str.lower()
+        == "healthy"
+    )
+    return train_dataframe[healthy_mask | early_mask].copy()
+
+
 def build_warmup_cosine_scheduler(
     optimizer: optim.Optimizer,
     total_steps: int,
@@ -354,6 +383,7 @@ def train_one_epoch(
     family_loss: nn.Module,
     family_loss_weight: float,
     gradient_clip_norm: float,
+    modality_dropout: float,
     scaler: Any,
     device: torch.device,
     amp_enabled: bool,
@@ -368,6 +398,23 @@ def train_one_epoch(
         batch_health = batch_health.to(device, non_blocking=True)
         batch_family = batch_family.to(device, non_blocking=True)
         batch_early = batch_early.to(device, non_blocking=True)
+        if model.ablation_mode is None and modality_dropout > 0:
+            drop_samples = (
+                torch.rand(batch_x.size(0), device=device) < modality_dropout
+            )
+            dropped_modality = torch.randint(
+                0, 2, (batch_x.size(0),), device=device
+            )
+            if drop_samples.any():
+                batch_indices = torch.arange(
+                    batch_x.size(0), device=device
+                )[drop_samples]
+                batch_x[
+                    batch_indices,
+                    dropped_modality[drop_samples],
+                    :,
+                    :,
+                ] = 0
         optimizer.zero_grad(set_to_none=True)
 
         with torch.autocast(
@@ -451,6 +498,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
     preload = bool(getattr(args, "preload", not smoke_test))
     shared_cache = getattr(args, "shared_tensor_cache", None)
     shared_tensors = shared_cache.tensors if shared_cache is not None else None
+    dataset_name = str(getattr(args, "dataset", ""))
 
     train_dataset = MultimodalDataset(
         train_dataframe,
@@ -458,6 +506,34 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         family_to_index,
         preload=preload and shared_tensors is None,
         shared_tensor_cache=shared_tensors,
+        dataset_name=dataset_name,
+    )
+    stage_two_dataframe = select_curriculum_stage_two_rows(
+        train_dataframe, dataset_name
+    )
+    stage_two_has_early_faults = bool(
+        len(stage_two_dataframe)
+        and any(
+            is_early_fault(severity, health, dataset_name)
+            for severity, health in zip(
+                stage_two_dataframe.get(
+                    "severity", pd.Series(dtype=str)
+                ).fillna(""),
+                stage_two_dataframe["health_label"],
+            )
+        )
+    )
+    stage_two_dataset = (
+        MultimodalDataset(
+            stage_two_dataframe,
+            tensor_dir,
+            family_to_index,
+            preload=False,
+            shared_tensor_cache=shared_tensors,
+            dataset_name=dataset_name,
+        )
+        if stage_two_has_early_faults
+        else None
     )
     validation_dataset = MultimodalDataset(
         validation_dataframe,
@@ -465,6 +541,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         family_to_index,
         preload=False,
         shared_tensor_cache=shared_tensors,
+        dataset_name=dataset_name,
     )
     test_dataset = MultimodalDataset(
         test_dataframe,
@@ -472,6 +549,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         family_to_index,
         preload=False,
         shared_tensor_cache=shared_tensors,
+        dataset_name=dataset_name,
     )
     train_loader = make_loader(
         train_dataset,
@@ -480,6 +558,18 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         seed=seed,
         num_workers=num_workers,
         pin_memory=device.type == "cuda",
+    )
+    stage_two_loader = (
+        make_loader(
+            stage_two_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            seed=seed + 1,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+        )
+        if stage_two_dataset is not None
+        else None
     )
     validation_loader = (
         make_loader(
@@ -510,15 +600,35 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
     )
     if not bool(getattr(args, "use_curriculum", True)):
         stage2_epochs = 0
+    elif stage_two_loader is None:
+        print(
+            f"Skipping Stage 2 for {dataset_name}: no valid lowest-severity "
+            "fault annotations are available."
+        )
+        stage2_epochs = 0
 
     learning_rate = float(getattr(args, "learning_rate", 1e-3))
     minimum_learning_rate = float(getattr(args, "minimum_learning_rate", 1e-5))
+    modality_dropout = float(
+        getattr(args, "modality_dropout", DEFAULT_MODALITY_DROPOUT)
+    )
+    if learning_rate <= 0:
+        raise ValueError("learning_rate must be positive")
+    if not 0 <= minimum_learning_rate <= learning_rate:
+        raise ValueError(
+            "minimum_learning_rate must be between 0 and learning_rate"
+        )
+    if not 0 <= modality_dropout < 1:
+        raise ValueError("modality_dropout must be in [0, 1)")
     optimizer = optim.AdamW(
         model.parameters(),
         lr=learning_rate,
         weight_decay=float(getattr(args, "weight_decay", 1e-4)),
     )
-    total_steps = len(train_loader) * (stage1_epochs + stage2_epochs)
+    total_steps = (
+        len(train_loader) * stage1_epochs
+        + (len(stage_two_loader) * stage2_epochs if stage_two_loader else 0)
+    )
     scheduler = build_warmup_cosine_scheduler(
         optimizer,
         total_steps=total_steps,
@@ -545,15 +655,19 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         in_stage_two = epoch >= stage1_epochs
         stage_name = "stage2_early_focus" if in_stage_two else "stage1_general"
         active_health_loss = configured_health_loss if in_stage_two else None
+        active_loader = stage_two_loader if in_stage_two else train_loader
+        if active_loader is None:
+            raise RuntimeError("Stage 2 was scheduled without a valid data loader")
         epoch_loss, maximum_gradient_norm = train_one_epoch(
             model=model,
-            data_loader=train_loader,
+            data_loader=active_loader,
             optimizer=optimizer,
             scheduler=scheduler,
             stage_health_loss=active_health_loss,
             family_loss=family_loss,
             family_loss_weight=float(getattr(args, "family_loss_weight", 0.5)),
             gradient_clip_norm=float(getattr(args, "gradient_clip_norm", 1.0)),
+            modality_dropout=modality_dropout,
             scaler=scaler,
             device=device,
             amp_enabled=amp_enabled,
@@ -606,14 +720,17 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         "processed_dir": str(processed_dir),
         "seed": seed,
         "ablation": ablation,
-        "curriculum": bool(getattr(args, "use_curriculum", True)),
+        "curriculum_requested": bool(getattr(args, "use_curriculum", True)),
+        "curriculum": stage2_epochs > 0,
         "loss_name": args.loss_name,
         "modality_gate": use_gate,
         "stage1_epochs": stage1_epochs,
         "stage2_epochs": stage2_epochs,
+        "stage2_samples": len(stage_two_dataframe) if stage2_epochs else 0,
         "learning_rate": learning_rate,
         "weight_decay": float(getattr(args, "weight_decay", 1e-4)),
         "gradient_clip_norm": float(getattr(args, "gradient_clip_norm", 1.0)),
+        "modality_dropout": modality_dropout,
         "warmup_ratio": float(getattr(args, "warmup_ratio", 0.1)),
         "shared_cache_splits": (
             ",".join(shared_cache.cached_splits) if shared_cache is not None else ""
@@ -636,9 +753,12 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             "history": history,
             "family_to_index": family_to_index,
             "model_config": {
+                "embed_dim": model.embed_dim,
                 "num_fault_families": len(family_to_index),
                 "ablation_mode": getattr(args, "ablation", None),
                 "use_modality_gate": use_gate,
+                "num_attention_heads": model.num_attention_heads,
+                "dropout": model.dropout,
             },
             "training_config": result,
         },
@@ -681,6 +801,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
+    parser.add_argument(
+        "--modality-dropout",
+        type=float,
+        default=DEFAULT_MODALITY_DROPOUT,
+    )
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--family-loss-weight", type=float, default=0.5)
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)

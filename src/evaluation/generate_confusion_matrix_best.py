@@ -8,7 +8,7 @@ from sklearn.metrics import confusion_matrix
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from src.models.multimodal_cross_attention import MultimodalMotorModel
+from src.evaluation.checkpoint import load_model_from_checkpoint
 
 def main():
     print("🎨 Generating Figure 3: BEST Binary Confusion Matrix...")
@@ -41,9 +41,7 @@ def main():
     test_df = pd.read_csv(index_path)
     test_df = test_df[test_df['split'] == 'test'].reset_index(drop=True)
 
-    model = MultimodalMotorModel(num_fault_families=5, ablation_mode=None).to(device)
-    model.load_state_dict(torch.load(best_ckpt, map_location=device)["state_dict"])
-    model.eval()
+    model, _ = load_model_from_checkpoint(best_ckpt, device)
     
     y_true = []
     y_pred = []

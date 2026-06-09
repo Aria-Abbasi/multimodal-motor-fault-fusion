@@ -1,41 +1,59 @@
+"""Regenerate the CWRU leave-one-load-out split without fallback leakage."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
 import pandas as pd
 
-# Load master metadata
-df = pd.read_csv('data/metadata/metadata_master.csv')
-cwru = df[df['dataset'] == 'cwru'].copy()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-print(f"Total CWRU files found: {len(cwru)}")
-print(f"Loads available: {cwru['load'].unique()}")
+from src.data.generate_splits import cwru_leave_one_load_out
 
-# Determine split logic based on available loads
-loads = sorted([l for l in cwru['load'].unique() if pd.notna(l)])
 
-if len(loads) > 1:
-    test_load = loads[-1]
-    val_load = loads[-2] if len(loads) > 2 else loads[0]
-    print(f"Assigning Load {test_load} -> test, Load {val_load} -> val, Others -> train")
-    
-    def assign_split(row):
-        if row['load'] == test_load: return 'test'
-        elif row['load'] == val_load: return 'val'
-        else: return 'train'
-        
-    cwru['split'] = cwru.apply(assign_split, axis=1)
-else:
-    print("Only 1 load found! Falling back to a 70/15/15 random recording split to prevent crashes.")
-    # Shuffle predictably
-    cwru = cwru.sample(frac=1, random_state=42).reset_index(drop=True)
-    n = len(cwru)
-    train_idx = int(n * 0.7)
-    val_idx = int(n * 0.85)
-    
-    cwru['split'] = 'test'
-    cwru.loc[:train_idx, 'split'] = 'train'
-    cwru.loc[train_idx+1:val_idx, 'split'] = 'val'
+def regenerate_cwru_split(
+    metadata_path: Path, output_path: Path
+) -> pd.DataFrame:
+    """Create a genuine LOSO split, refusing an unsupported one-load dataset."""
+    metadata = pd.read_csv(metadata_path)
+    cwru = metadata[metadata["dataset"] == "cwru"].copy()
+    loads = sorted(
+        {
+            str(load)
+            for load in cwru["load"].dropna().tolist()
+            if str(load).strip().lower() not in {"", "unknown", "nan"}
+        }
+    )
+    if len(loads) < 2:
+        raise ValueError(
+            "CWRU leave-one-load-out requires at least two distinct loads. "
+            f"Found {loads}. Download loads 0, 2, and 3 before regenerating."
+        )
 
-print("\nNew split distribution:")
-print(cwru['split'].value_counts())
+    split = cwru_leave_one_load_out(metadata)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    split.to_csv(output_path, index=False)
+    return split
 
-# Save fixed split file
-cwru[['recording_id', 'split']].to_csv('data/splits/cwru_leave_one_load_out.csv', index=False)
-print("\nSuccessfully overwritten data/splits/cwru_leave_one_load_out.csv!")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--metadata", default="data/metadata/metadata_master.csv"
+    )
+    parser.add_argument(
+        "--output", default="data/splits/cwru_leave_one_load_out.csv"
+    )
+    args = parser.parse_args()
+
+    try:
+        split = regenerate_cwru_split(Path(args.metadata), Path(args.output))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"Wrote {args.output}: {len(split)} rows")
+
+
+if __name__ == "__main__":
+    main()

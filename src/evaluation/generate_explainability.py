@@ -8,7 +8,7 @@ from scipy.ndimage import gaussian_filter
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from src.models.multimodal_cross_attention import MultimodalMotorModel
+from src.evaluation.checkpoint import load_model_from_checkpoint
 
 def normalize_heatmap(grad):
     # Absolute value, then scale 0 to 1
@@ -39,9 +39,7 @@ def main():
     
     samples = {"Healthy Motor": healthy_row, "Faulty Motor": faulty_row}
     
-    model = MultimodalMotorModel(num_fault_families=5, ablation_mode=None).to(device)
-    model.load_state_dict(torch.load(best_ckpt, map_location=device)["state_dict"])
-    model.eval()
+    model, _ = load_model_from_checkpoint(best_ckpt, device)
     
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     plt.style.use('seaborn-v0_8-paper')
