@@ -60,15 +60,38 @@ python -m src.training.train_multimodal \
   --seed 42
 ```
 
-Run the full loss/gate matrix (12 configurations x 5 seeds):
+Build all four leakage-safe NLN-EMP leave-one-speed-out folds. Each fold is
+written to its own directory and receives train-only normalization statistics:
+
+```bash
+python -m src.data.build_spectrograms \
+  --split-file data/splits/nln_emp_leave_one_speed_out.csv \
+  --dataset nln_emp \
+  --all-folds
+```
+
+Run the full NLN-EMP loss/gate matrix
+(`4 folds x 12 configurations x 5 seeds = 240 jobs`):
 
 ```bash
 python -m src.training.experiment_runner \
   --protocol nln_emp \
-  --output-file results/tables/loss_gate_matrix_results.csv
+  --output-file results/tables/nln_loss_gate_results.csv \
+  --summary-file results/tables/nln_loss_gate_summary.csv
 ```
 
-Run the same matrix on the Paderborn artificial-to-natural protocol:
+The raw CSV contains one row per fold/configuration/seed. The summary CSV
+reports mean and sample standard deviation across all fold-seed runs for each
+configuration. Resume checks also use the fold ID, so completing one held-out
+speed never suppresses another.
+
+Build and run the Paderborn artificial-to-natural protocol:
+
+```bash
+python -m src.data.build_spectrograms \
+  --split-file data/splits/paderborn_artificial_to_natural.csv \
+  --dataset paderborn
+```
 
 ```bash
 python -m src.training.experiment_runner \
@@ -80,8 +103,8 @@ Because Paderborn bearing IDs are not severity annotations, Paderborn runs use
 standard cross-entropy only. The runner evaluates gate off/on across five
 seeds (10 jobs per Paderborn protocol) and reports early-fault recall as `N/A`.
 
-Run NLN-EMP and then Paderborn in one process. The runner releases the
-NLN-EMP cache before loading Paderborn:
+Run complete NLN-EMP and then Paderborn in one process. The runner caches and
+releases one fold at a time:
 
 ```bash
 python -m src.training.experiment_runner \
@@ -91,7 +114,9 @@ python -m src.training.experiment_runner \
 ```
 
 The runner resumes at seed level. Paderborn early-fault recall is reported as
-`N/A` when the test metadata has no granular severity labels.
+`N/A` when the test metadata has no granular severity labels. Missing expected
+folds stop execution by default; `--allow-partial-folds` is intended only for
+explicit debugging.
 
 Run tests:
 

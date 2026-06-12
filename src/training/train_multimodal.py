@@ -717,6 +717,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         "run_id": run_id,
         "experiment": getattr(args, "experiment", run_id),
         "dataset": getattr(args, "dataset", "unknown"),
+        "fold_id": getattr(args, "fold_id", ""),
         "processed_dir": str(processed_dir),
         "seed": seed,
         "ablation": ablation,

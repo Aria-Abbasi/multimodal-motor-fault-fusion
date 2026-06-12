@@ -1,18 +1,18 @@
-"""
-src/data/build_spectrograms.py
-Generates 128x128 STFT log-spectrogram tensors with strict train-only normalization.
-(Finalized Version with Dataset-Agnostic Resilience & MATLAB struct unpacking)
-"""
-import os
-import yaml
-import torch
-import torch.nn.functional as F
+"""Build deterministic, leakage-safe spectrogram tensors for one or more folds."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import scipy.signal
-import matplotlib.pyplot as plt
-from pathlib import Path
+import yaml
+import torch
+import torch.nn.functional as F
 from tqdm import tqdm
+
 from .signal_io import load_recording_signals
 from .preprocessing_config import (
     SPECTROGRAM_SIZE,
@@ -21,14 +21,11 @@ from .preprocessing_config import (
     WINDOW_OVERLAP,
     WINDOW_SIZE,
 )
-import argparse
 
 def compute_stft_spectrogram(
     signal: np.ndarray, target_size=SPECTROGRAM_SIZE
 ) -> torch.Tensor:
     """Computes STFT, converts to log-magnitude, and resizes to target shape."""
-    # Add tiny noise to prevent log(0) issues
-    signal = signal + np.random.normal(0, 1e-8, len(signal))
     _, _, Zxx = scipy.signal.stft(
         signal,
         window="hann",
@@ -43,63 +40,29 @@ def compute_stft_spectrogram(
     
     return resized_spec.squeeze(0).squeeze(0)
 
-def main():
-    parser = argparse.ArgumentParser(description="Build spectrogram dataset")
-    parser.add_argument("--config", type=str, default="configs/base.yaml")
-    parser.add_argument("--split_file", type=str, required=True)
-    parser.add_argument("--dataset", type=str, required=True)
-    parser.add_argument(
-        "--fold-id",
-        type=str,
-        help="Required when the split CSV contains more than one fold.",
-    )
-    args = parser.parse_args()
+def build_fold_spectrograms(
+    df: pd.DataFrame,
+    dataset: str,
+    base_out_dir: Path,
+) -> None:
+    """Build tensors for one fold using statistics from that fold's train split."""
+    import matplotlib.pyplot as plt
 
-    # Load configuration for output paths
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
-        
-    # Setup directory structure
-    base_out_dir = Path(config["paths"]["processed"]) / args.dataset / Path(args.split_file).stem
     tensor_dir = base_out_dir / "tensors"
     qc_dir = base_out_dir / "qc_plots"
     tensor_dir.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load the Split File directly
-    df = pd.read_csv(args.split_file)
-    
-    # 2. Resilience Patch: Inject dataset column if missing (Common in CWRU splits)
-    if 'dataset' not in df.columns:
-        print(f"⚠️ 'dataset' column missing in {args.split_file}. Using argument: {args.dataset}")
-        df['dataset'] = args.dataset
-    
-    # Clean strings
-    df['split'] = df['split'].astype(str).str.strip().str.lower()
-    df['dataset'] = df['dataset'].astype(str).str.strip().str.lower()
-    df['recording_id'] = df['recording_id'].astype(str).str.strip()
-    
-    # 3. Filter for the requested dataset
-    df = df[df['dataset'] == args.dataset.lower()]
-    if "fold_id" in df.columns:
-        fold_ids = sorted(df["fold_id"].dropna().astype(str).unique())
-        if args.fold_id:
-            if args.fold_id not in fold_ids:
-                raise ValueError(
-                    f"Unknown fold '{args.fold_id}'. Available folds: {fold_ids}"
-                )
-            df = df[df["fold_id"].astype(str) == args.fold_id].copy()
-        elif len(fold_ids) > 1:
-            raise ValueError(
-                "Split file contains multiple folds. Pass --fold-id with one of: "
-                + ", ".join(fold_ids)
-            )
-
-    print(f"\n--- Processing {args.dataset} | Protocol: {Path(args.split_file).stem} ---")
+    fold_id = (
+        str(df["fold_id"].iloc[0])
+        if "fold_id" in df.columns and len(df)
+        else "single_fold"
+    )
+    print(f"\n--- Processing {dataset} | Fold: {fold_id} ---")
     print(f"Total recordings in split file: {len(df)}")
     
     if len(df) == 0:
-        raise ValueError(f"No records found for dataset '{args.dataset}' in {args.split_file}")
+        raise ValueError(f"No records found for dataset '{dataset}'")
 
     print(f"Split distribution: {df['split'].value_counts().to_dict()}")
 
@@ -121,7 +84,7 @@ def main():
 
     for _, row in tqdm(train_df.iterrows(), total=len(train_df), desc="Pass 1: Stats"):
         try:
-            vib, curr = load_recording_signals(Path(row['source_path']), args.dataset)
+            vib, curr = load_recording_signals(Path(row['source_path']), dataset)
             vib = np.asarray(vib).flatten()
             curr = np.asarray(curr).flatten()
             
@@ -161,7 +124,7 @@ def main():
     
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Pass 2: Saving"):
         try:
-            vib, curr = load_recording_signals(Path(row['source_path']), args.dataset)
+            vib, curr = load_recording_signals(Path(row['source_path']), dataset)
             vib, curr = np.asarray(vib).flatten(), np.asarray(curr).flatten()
             num_windows = (len(vib) - window_size) // step_size + 1
             
@@ -186,8 +149,8 @@ def main():
                     'tensor_id': tensor_filename,
                     'recording_id': row['recording_id'],
                     'split': row['split'],
-                    'dataset': row.get('dataset', args.dataset.lower()),
-                    'fold_id': row.get('fold_id', args.fold_id or ''),
+                    'dataset': row.get('dataset', dataset.lower()),
+                    'fold_id': row.get('fold_id', fold_id),
                     'fault_family': row.get('fault_family', 'unknown'),
                     'severity': row.get('severity', 'unknown'),
                     'damage_source': row.get('damage_source', 'unknown'),
@@ -211,6 +174,87 @@ def main():
 
     pd.DataFrame(windows_index_data).to_csv(base_out_dir / "windows_index.csv", index=False)
     print(f"\n--- Done! Saved {global_window_idx} windows to {tensor_dir} ---")
+
+
+def select_fold_frames(
+    df: pd.DataFrame,
+    fold_id: str | None,
+    all_folds: bool,
+) -> list[tuple[str, pd.DataFrame]]:
+    """Return explicitly selected fold dataframes without mixing their statistics."""
+    if fold_id and all_folds:
+        raise ValueError("--fold-id and --all-folds cannot be used together")
+
+    if "fold_id" not in df.columns:
+        return [("single_fold", df.copy())]
+
+    fold_ids = sorted(df["fold_id"].dropna().astype(str).unique())
+    if not fold_ids:
+        return [("single_fold", df.copy())]
+    if fold_id:
+        if fold_id not in fold_ids:
+            raise ValueError(
+                f"Unknown fold '{fold_id}'. Available folds: {fold_ids}"
+            )
+        return [(fold_id, df[df["fold_id"].astype(str) == fold_id].copy())]
+    if all_folds:
+        return [
+            (current_fold, df[df["fold_id"].astype(str) == current_fold].copy())
+            for current_fold in fold_ids
+        ]
+    if len(fold_ids) > 1:
+        raise ValueError(
+            "Split file contains multiple folds. Pass --all-folds or --fold-id "
+            "with one of: " + ", ".join(fold_ids)
+        )
+    return [(fold_ids[0], df.copy())]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=str, default="configs/base.yaml")
+    parser.add_argument("--split-file", "--split_file", dest="split_file", required=True)
+    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--fold-id")
+    parser.add_argument(
+        "--all-folds",
+        action="store_true",
+        help="Process every fold into its own subdirectory.",
+    )
+    args = parser.parse_args()
+
+    with open(args.config, "r", encoding="utf-8") as config_file:
+        config = yaml.safe_load(config_file)
+
+    df = pd.read_csv(args.split_file)
+    if "dataset" not in df.columns:
+        df["dataset"] = args.dataset
+    df["split"] = df["split"].astype(str).str.strip().str.lower()
+    df["dataset"] = df["dataset"].astype(str).str.strip().str.lower()
+    df["recording_id"] = df["recording_id"].astype(str).str.strip()
+    df = df[df["dataset"] == args.dataset.lower()].copy()
+    if len(df) == 0:
+        raise ValueError(
+            f"No records found for dataset '{args.dataset}' in {args.split_file}"
+        )
+
+    fold_frames = select_fold_frames(df, args.fold_id, args.all_folds)
+    protocol_dir = (
+        Path(config["paths"]["processed"])
+        / args.dataset
+        / Path(args.split_file).stem
+    )
+    use_fold_subdirectories = len(fold_frames) > 1 or (
+        "fold_id" in df.columns
+        and len(df["fold_id"].dropna().astype(str).unique()) > 1
+    )
+    for current_fold, fold_df in fold_frames:
+        output_dir = (
+            protocol_dir / current_fold
+            if use_fold_subdirectories
+            else protocol_dir
+        )
+        build_fold_spectrograms(fold_df, args.dataset, output_dir)
 
 if __name__ == "__main__":
     main()
