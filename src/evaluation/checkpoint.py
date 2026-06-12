@@ -8,6 +8,7 @@ from typing import Any, Optional
 import torch
 
 from src.models.multimodal_cross_attention import (
+    MODEL_ATTENTION_BLOCKS,
     MODEL_ATTENTION_HEADS,
     MODEL_DROPOUT,
     MultimodalMotorModel,
@@ -42,6 +43,9 @@ def infer_model_config(
             saved_config.get("num_attention_heads", MODEL_ATTENTION_HEADS)
         ),
         "dropout": float(saved_config.get("dropout", MODEL_DROPOUT)),
+        "num_attention_blocks": int(
+            saved_config.get("num_attention_blocks", MODEL_ATTENTION_BLOCKS)
+        ),
     }
 
 

@@ -1,109 +1,92 @@
-import torch
-import time
-import pandas as pd
-from pathlib import Path
-import sys
+"""Generate dataset and model-complexity tables without fixed result rows."""
 
-# Ensure local imports work
-sys.path.append(str(Path(__file__).resolve().parents[2]))
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+
+import pandas as pd
+import torch
+
 from src.models.multimodal_cross_attention import MultimodalMotorModel
 
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def measure_inference_time(model, dummy_input):
+def measure_inference_ms(model: torch.nn.Module, inputs: torch.Tensor) -> float:
     model.eval()
-    # Warmup
     with torch.no_grad():
-        for _ in range(5):
-            model(dummy_input)
-    
-    # Measure
-    start_time = time.time()
-    with torch.no_grad():
-        for _ in range(50):
-            model(dummy_input)
-    end_time = time.time()
-    
-    # Return time per sample in milliseconds (assuming batch size 1)
-    return ((end_time - start_time) / 50) * 1000
+        for _ in range(3):
+            model(inputs)
+        start = time.perf_counter()
+        for _ in range(20):
+            model(inputs)
+    return (time.perf_counter() - start) * 1000 / 20
 
-def main():
-    print("⚙️ Generating Table 1 (Dataset Summary) and Table 5 (Complexity)...")
-    out_dir = Path('results/tables')
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Generate Table 1 (Dataset Summary) ---
-    metadata = pd.read_csv("data/metadata/metadata_master.csv")
-
-    def fault_family_count(dataset):
-        subset = metadata[
-            (metadata["dataset"] == dataset)
-            & (metadata["health_label"].astype(str).str.lower() == "fault")
-        ]
-        return subset["fault_family"].nunique()
-
-    nln_families = fault_family_count("nln_emp")
-    paderborn_families = fault_family_count("paderborn")
-    cwru_families = fault_family_count("cwru")
-
-    table1_latex = f"""\\begin{{table}}[h]
-\\centering
-\\caption{{Summary of Evaluated Motor Fault Datasets}}
-\\label{{tab:datasets}}
-\\begin{{tabular}}{{lccc}}
-\\hline
-\\textbf{{Dataset}} & \\textbf{{Available Sensors}} & \\textbf{{Fault Families}} & \\textbf{{Generalization Protocol}} \\\\
-\\hline
-NLN-EMP & Vibration, Current & {nln_families} & Leave-One-Speed-Out \\\\
-Paderborn (PU) & Vibration, Current & {paderborn_families} & Artificial to Natural \\\\
-CWRU & Vibration Only & {cwru_families} & Leave-One-Load-Out \\\\
-\\hline
-\\end{{tabular}}
-\\end{{table}}
-"""
-    with open(out_dir / 'table1_datasets.tex', 'w') as f:
-        f.write(table1_latex)
-
-    # --- Generate Table 5 (Complexity) ---
-    # Create dummy tensors for 1 sample (1 channel, 4096 sequence length typical for windows)
-    dummy_input = torch.randn(1, 2, 128, 128)
-    
-    models = {
-        "Fusion (Proposed)": MultimodalMotorModel(
-            num_fault_families=nln_families + 1, ablation_mode=None
-        ),
-        "Vibration Only": MultimodalMotorModel(
-            num_fault_families=nln_families + 1,
-            ablation_mode="vibration_only",
-        ),
-        "Current Only": MultimodalMotorModel(
-            num_fault_families=nln_families + 1,
-            ablation_mode="current_only",
-        ),
+def generate_tables(metadata_path: Path, output_dir: Path) -> tuple[Path, Path]:
+    metadata = pd.read_csv(metadata_path)
+    dataset_rows = []
+    protocols = {
+        "nln_emp": "Leave-one-speed-out",
+        "paderborn": "Condition and artificial-to-natural",
+        "cwru": "Leave-one-load-out",
     }
+    for dataset, group in metadata.groupby("dataset"):
+        dataset_rows.append(
+            {
+                "dataset": dataset,
+                "sensors": "|".join(
+                    sorted(group["sensor_types_present"].astype(str).unique())
+                ),
+                "fault_families": group[
+                    group["health_label"].astype(str).str.lower() == "fault"
+                ]["fault_family"].nunique(),
+                "protocol": protocols.get(str(dataset), "unknown"),
+                "recordings": group["base_recording_id"].nunique(),
+            }
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_path = output_dir / "table1_datasets.csv"
+    pd.DataFrame(dataset_rows).to_csv(dataset_path, index=False)
 
-    table5_latex = """\\begin{table}[h]
-\\centering
-\\caption{Model Complexity and CPU Inference Time per Sample}
-\\label{tab:complexity}
-\\begin{tabular}{lcc}
-\\hline
-\\textbf{Architecture} & \\textbf{Parameters (Millions)} & \\textbf{Inference Time (ms)} \\\\
-\\hline\n"""
+    family_count = max(
+        2,
+        metadata[metadata["dataset"] == "nln_emp"]["fault_family"].nunique(),
+    )
+    dummy = torch.randn(1, 2, 128, 128)
+    complexity_rows = []
+    for name, ablation in (
+        ("proposed", None),
+        ("vibration_only", "vibration_only"),
+        ("current_only", "current_only"),
+    ):
+        model = MultimodalMotorModel(
+            num_fault_families=family_count,
+            ablation_mode=ablation,
+        )
+        complexity_rows.append(
+            {
+                "model": name,
+                "parameters": sum(
+                    parameter.numel() for parameter in model.parameters()
+                ),
+                "cpu_inference_ms": measure_inference_ms(model, dummy),
+            }
+        )
+    complexity_path = output_dir / "table5_complexity.csv"
+    pd.DataFrame(complexity_rows).to_csv(complexity_path, index=False)
+    return dataset_path, complexity_path
 
-    for name, model in models.items():
-        params = count_parameters(model) / 1_000_000  # Convert to Millions
-        inf_time = measure_inference_time(model, dummy_input)
-        table5_latex += f"{name} & {params:.2f}M & {inf_time:.2f} ms \\\\\n"
 
-    table5_latex += "\\hline\n\\end{tabular}\n\\end{table}\n"
-    
-    with open(out_dir / 'table5_complexity.tex', 'w') as f:
-        f.write(table5_latex)
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--metadata", default="data/metadata/metadata_master.csv"
+    )
+    parser.add_argument("--output-dir", default="results/tables")
+    args = parser.parse_args()
+    print(generate_tables(Path(args.metadata), Path(args.output_dir)))
 
-    print("\n✅ Table 1 and Table 5 LaTeX generated!")
-    print(table5_latex)
 
 if __name__ == "__main__":
     main()

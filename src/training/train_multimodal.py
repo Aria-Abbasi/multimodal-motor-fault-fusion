@@ -23,15 +23,19 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.evaluation.metrics import (  # noqa: E402
+    aggregate_recording_predictions,
     compute_binary_metrics,
     format_optional_metric,
     is_early_fault,
+    select_decision_threshold,
 )
 from src.models.multimodal_cross_attention import MultimodalMotorModel  # noqa: E402
 from src.training.losses import LOSS_NAMES, build_health_loss  # noqa: E402
+from src.training.data_selection import select_label_budget  # noqa: E402
 
 
 DEFAULT_MODALITY_DROPOUT = 0.2
+PIPELINE_VERSION = "corrected_multimodal_v2"
 
 
 @dataclass
@@ -81,6 +85,12 @@ class MultimodalDataset(Dataset):
         self.family_to_index = family_to_index
         self.shared_tensor_cache = shared_tensor_cache
         self.dataset_name = dataset_name
+        aggregation_column = (
+            "base_recording_id"
+            if "base_recording_id" in self.dataframe.columns
+            else "recording_id"
+        )
+        self.recording_ids = self.dataframe[aggregation_column].astype(str).tolist()
         self.health_labels = [
             1 if "fault" in str(label).lower() else 0
             for label in self.dataframe["health_label"]
@@ -123,7 +133,7 @@ class MultimodalDataset(Dataset):
 
     def __getitem__(
         self, index: int
-    ) -> tuple[torch.Tensor, int, int, bool]:
+    ) -> tuple[torch.Tensor, int, int, bool, str]:
         tensor_id = str(self.dataframe.iloc[index]["tensor_id"])
         if self.shared_tensor_cache is not None and tensor_id in self.shared_tensor_cache:
             tensor = self.shared_tensor_cache[tensor_id]
@@ -136,10 +146,11 @@ class MultimodalDataset(Dataset):
         else:
             tensor = self.tensors[index]
         return (
-            tensor,
+            tensor.float(),
             self.health_labels[index],
             self.family_labels[index],
             self.early_fault_labels[index],
+            self.recording_ids[index],
         )
 
 
@@ -331,40 +342,69 @@ def evaluate_model(
     data_loader: DataLoader,
     device: torch.device,
     amp_enabled: bool,
+    decision_threshold: float = 0.5,
 ) -> dict[str, Any]:
-    """Evaluate all binary paper metrics and optional gate statistics."""
+    """Evaluate window- and recording-level metrics at a fixed threshold."""
     model.eval()
     targets: list[int] = []
-    predictions: list[int] = []
     probabilities: list[float] = []
     early_mask: list[bool] = []
+    recording_ids: list[str] = []
     gate_values: list[float] = []
 
     with torch.no_grad():
-        for batch_x, batch_health, _, batch_early in data_loader:
+        for batch_x, batch_health, _, batch_early, batch_recording_ids in data_loader:
             batch_x = batch_x.to(device, non_blocking=True)
             with torch.autocast(
                 device_type=device.type, dtype=torch.float16, enabled=amp_enabled
             ):
                 health_logits, _ = model(batch_x)
             fault_probability = torch.softmax(health_logits.float(), dim=1)[:, 1]
-            batch_predictions = health_logits.argmax(dim=1)
 
             targets.extend(batch_health.numpy().tolist())
-            predictions.extend(batch_predictions.cpu().numpy().tolist())
             probabilities.extend(fault_probability.cpu().numpy().tolist())
             early_mask.extend(batch_early.numpy().astype(bool).tolist())
+            recording_ids.extend(map(str, batch_recording_ids))
             if model.last_current_gate is not None:
                 gate_values.extend(
                     model.last_current_gate.flatten().cpu().numpy().tolist()
                 )
 
+    predictions = [
+        int(probability >= decision_threshold) for probability in probabilities
+    ]
     metrics = compute_binary_metrics(
         targets,
         predictions,
         fault_probabilities=probabilities,
         early_fault_mask=early_mask,
     )
+    recording_targets, recording_probabilities, recording_early = (
+        aggregate_recording_predictions(
+            recording_ids, targets, probabilities, early_mask
+        )
+    )
+    recording_predictions = [
+        int(probability >= decision_threshold)
+        for probability in recording_probabilities
+    ]
+    recording_metrics = compute_binary_metrics(
+        recording_targets,
+        recording_predictions,
+        fault_probabilities=recording_probabilities,
+        early_fault_mask=recording_early,
+    )
+    metrics.update(
+        {
+            f"recording_{name}": value
+            for name, value in recording_metrics.items()
+        }
+    )
+    metrics["decision_threshold"] = float(decision_threshold)
+    metrics["_targets"] = targets
+    metrics["_probabilities"] = probabilities
+    metrics["_recording_targets"] = recording_targets
+    metrics["_recording_probabilities"] = recording_probabilities
     metrics["current_gate_mean"] = (
         float(np.mean(gate_values)) if gate_values else float("nan")
     )
@@ -393,7 +433,7 @@ def train_one_epoch(
     running_loss = 0.0
     maximum_gradient_norm = 0.0
 
-    for batch_x, batch_health, batch_family, batch_early in data_loader:
+    for batch_x, batch_health, batch_family, batch_early, _ in data_loader:
         batch_x = batch_x.to(device, non_blocking=True)
         batch_health = batch_health.to(device, non_blocking=True)
         batch_family = batch_family.to(device, non_blocking=True)
@@ -481,6 +521,10 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
     index_dataframe = pd.read_csv(index_path)
     train_dataframe, validation_dataframe, test_dataframe = select_index_splits(
         index_dataframe, smoke_test
+    )
+    label_budget = float(getattr(args, "label_budget", 1.0))
+    train_dataframe = select_label_budget(
+        train_dataframe, label_budget, seed
     )
 
     family_to_index = build_family_mapping(train_dataframe)
@@ -678,7 +722,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             validation_metrics = evaluate_model(
                 model, validation_loader, device, amp_enabled
             )
-            validation_f1 = validation_metrics["macro_f1"]
+            validation_f1 = validation_metrics["recording_macro_f1"]
             if validation_f1 > best_validation_f1:
                 best_validation_f1 = validation_f1
                 best_state = copy.deepcopy(model.state_dict())
@@ -703,7 +747,44 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     model.load_state_dict(best_state)
-    test_metrics = evaluate_model(model, test_loader, device, amp_enabled)
+    decision_threshold = 0.5
+    calibrated_validation_metrics: dict[str, Any] = {}
+    if validation_loader is not None:
+        calibration = evaluate_model(
+            model, validation_loader, device, amp_enabled, decision_threshold=0.5
+        )
+        decision_threshold = select_decision_threshold(
+            calibration["_recording_targets"],
+            calibration["_recording_probabilities"],
+        )
+        calibrated_validation_metrics = evaluate_model(
+            model,
+            validation_loader,
+            device,
+            amp_enabled,
+            decision_threshold=decision_threshold,
+        )
+        for private_key in (
+            "_targets",
+            "_probabilities",
+            "_recording_targets",
+            "_recording_probabilities",
+        ):
+            calibrated_validation_metrics.pop(private_key, None)
+    test_metrics = evaluate_model(
+        model,
+        test_loader,
+        device,
+        amp_enabled,
+        decision_threshold=decision_threshold,
+    )
+    for private_key in (
+        "_targets",
+        "_probabilities",
+        "_recording_targets",
+        "_recording_probabilities",
+    ):
+        test_metrics.pop(private_key, None)
     ablation = getattr(args, "ablation", None) or "fusion"
     run_id = str(
         getattr(
@@ -714,7 +795,15 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     result = {
+        "pipeline_version": PIPELINE_VERSION,
         "run_id": run_id,
+        "paper_experiment": getattr(args, "paper_experiment", "matrix"),
+        "protocol": getattr(args, "protocol", dataset_name),
+        "model": "proposed",
+        "configuration": getattr(
+            args, "configuration", getattr(args, "experiment", run_id)
+        ),
+        "label_budget": label_budget,
         "experiment": getattr(args, "experiment", run_id),
         "dataset": getattr(args, "dataset", "unknown"),
         "fold_id": getattr(args, "fold_id", ""),
@@ -728,6 +817,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         "stage1_epochs": stage1_epochs,
         "stage2_epochs": stage2_epochs,
         "stage2_samples": len(stage_two_dataframe) if stage2_epochs else 0,
+        "n_train_windows": len(train_dataframe),
         "learning_rate": learning_rate,
         "weight_decay": float(getattr(args, "weight_decay", 1e-4)),
         "gradient_clip_norm": float(getattr(args, "gradient_clip_norm", 1.0)),
@@ -739,6 +829,10 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         "shared_cache_estimated_gb": (
             shared_cache.estimated_gb if shared_cache is not None else 0.0
         ),
+        **{
+            f"validation_{name}": value
+            for name, value in calibrated_validation_metrics.items()
+        },
         **test_metrics,
     }
 
@@ -759,8 +853,10 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
                 "ablation_mode": getattr(args, "ablation", None),
                 "use_modality_gate": use_gate,
                 "num_attention_heads": model.num_attention_heads,
+                "num_attention_blocks": model.num_attention_blocks,
                 "dropout": model.dropout,
             },
+            "decision_threshold": decision_threshold,
             "training_config": result,
         },
         checkpoint_path,
@@ -770,7 +866,13 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
     if bool(getattr(args, "write_detailed_metrics", True)):
         append_result_csv(
             result,
-            Path(getattr(args, "metrics_file", "results/tables/detailed_metrics.csv")),
+            Path(
+                getattr(
+                    args,
+                    "metrics_file",
+                    "results/tables/corrected_detailed_metrics.csv",
+                )
+            ),
         )
 
     print(
@@ -817,7 +919,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts/checkpoints/loss_gate_matrix",
     )
     parser.add_argument(
-        "--metrics-file", default="results/tables/detailed_metrics.csv"
+        "--metrics-file", default="results/tables/corrected_detailed_metrics.csv"
     )
     return parser
 

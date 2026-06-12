@@ -11,6 +11,7 @@ from typing import Any
 import pandas as pd
 
 from src.training.experiment_config import LOSS_NAMES
+from src.training.train_multimodal import PIPELINE_VERSION
 
 
 PROTOCOLS = {
@@ -29,11 +30,20 @@ PROTOCOLS = {
         "folder": "paderborn/paderborn_condition_generalization",
         "split_file": "paderborn_condition_generalization.csv",
     },
+    "cwru": {
+        "dataset": "cwru",
+        "folder": "cwru/cwru_leave_one_load_out",
+        "split_file": "cwru_leave_one_load_out.csv",
+    },
 }
 DEFAULT_SEEDS = (42, 123, 999, 7, 88)
 SUMMARY_METRICS = (
     "macro_f1",
+    "recording_macro_f1",
+    "validation_macro_f1",
+    "validation_recording_macro_f1",
     "balanced_acc",
+    "recording_balanced_acc",
     "accuracy",
     "early_fault_recall",
     "auroc",
@@ -110,6 +120,10 @@ def is_completed(
         & (existing["experiment"].astype(str) == experiment)
         & (existing["seed"].astype(str) == str(seed))
     ]
+    if "pipeline_version" in match.columns:
+        match = match[
+            match["pipeline_version"].astype(str) == PIPELINE_VERSION
+        ]
     return bool((match["status"] == "COMPLETED").any())
 
 
@@ -236,6 +250,31 @@ def write_aggregate_summary(
             row[f"{metric}_std"] = (
                 float(values.std(ddof=1)) if len(values) > 1 else float("nan")
             )
+            if metric in group.columns:
+                numeric_group = group.assign(
+                    _metric=pd.to_numeric(group[metric], errors="coerce")
+                ).dropna(subset=["_metric"])
+                fold_means = numeric_group.groupby("fold_id")["_metric"].mean()
+                within_fold_stds = (
+                    numeric_group.groupby("fold_id")["_metric"]
+                    .std(ddof=1)
+                    .dropna()
+                )
+                row[f"{metric}_mean_of_fold_means"] = (
+                    float(fold_means.mean())
+                    if len(fold_means)
+                    else float("nan")
+                )
+                row[f"{metric}_between_fold_std"] = (
+                    float(fold_means.std(ddof=1))
+                    if len(fold_means) > 1
+                    else float("nan")
+                )
+                row[f"{metric}_mean_within_fold_seed_std"] = (
+                    float(within_fold_stds.mean())
+                    if len(within_fold_stds)
+                    else float("nan")
+                )
         rows.append(row)
 
     summary = pd.DataFrame(rows).sort_values(
@@ -259,6 +298,13 @@ def run_protocol_matrix(args: argparse.Namespace, protocol: str) -> None:
 
     protocol_config = PROTOCOLS[protocol]
     output_path = Path(args.output_file)
+    if output_path.exists():
+        existing_columns = pd.read_csv(output_path, nrows=1).columns
+        if "pipeline_version" not in existing_columns:
+            raise ValueError(
+                f"{output_path} contains legacy results. Archive or rename it; "
+                "corrected runs must not be mixed with the old pipeline."
+            )
     summary_path = Path(
         getattr(args, "summary_file", None) or default_summary_path(output_path)
     )
@@ -485,7 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument(
         "--output-file",
-        default="results/tables/loss_gate_matrix_results.csv",
+        default="results/tables/corrected_loss_gate_matrix_results.csv",
     )
     parser.add_argument(
         "--summary-file",

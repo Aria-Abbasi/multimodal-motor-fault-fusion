@@ -58,6 +58,20 @@ training:
     - false
     - true
 
+preprocessing:
+  tensor_dtype: float16
+  nln_alignment_policy: condition_level_weak_alignment
+  nln_vibration_channel: null
+  nln_current_channels:
+    - 1
+    - 2
+    - 3
+  paderborn_vibration_channel: vibration_1
+  paderborn_current_channels:
+    - phase_current_1
+    - phase_current_2
+  current_representation: mean_of_phase_log_magnitude_spectrograms
+
 evaluation:
   metrics:
     - macro_f1

@@ -112,6 +112,69 @@ def compute_binary_metrics(
     }
 
 
+def select_decision_threshold(
+    targets: Iterable[int],
+    fault_probabilities: Iterable[float],
+) -> float:
+    """Choose the validation threshold that maximizes Macro F1."""
+    y_true = np.asarray(list(targets), dtype=np.int64)
+    scores = np.asarray(list(fault_probabilities), dtype=np.float64)
+    if not len(y_true) or y_true.shape != scores.shape:
+        raise ValueError("targets and probabilities must be non-empty and aligned")
+    if len(np.unique(y_true)) < 2:
+        return 0.5
+    candidates = np.unique(np.concatenate(([0.0, 0.5, 1.0], scores)))
+    ranked = []
+    for threshold in candidates:
+        predictions = (scores >= threshold).astype(np.int64)
+        macro_f1 = f1_score(
+            y_true, predictions, average="macro", zero_division=0
+        )
+        ranked.append(
+            (float(macro_f1), -abs(float(threshold) - 0.5), float(threshold))
+        )
+    return max(ranked)[2]
+
+
+def aggregate_recording_predictions(
+    recording_ids: Iterable[str],
+    targets: Iterable[int],
+    fault_probabilities: Iterable[float],
+    early_fault_mask: Optional[Iterable[bool]] = None,
+) -> tuple[list[int], list[float], list[bool]]:
+    """Mean-pool window probabilities into one unit per recording."""
+    identifiers = list(recording_ids)
+    labels = list(targets)
+    probabilities = list(fault_probabilities)
+    early = (
+        [False] * len(labels)
+        if early_fault_mask is None
+        else list(early_fault_mask)
+    )
+    lengths = {len(identifiers), len(labels), len(probabilities), len(early)}
+    if lengths == {0} or len(lengths) != 1:
+        raise ValueError("recording aggregation inputs must be non-empty and aligned")
+
+    grouped: dict[str, list[int]] = {}
+    for index, recording_id in enumerate(identifiers):
+        grouped.setdefault(str(recording_id), []).append(index)
+
+    output_labels: list[int] = []
+    output_probabilities: list[float] = []
+    output_early: list[bool] = []
+    for recording_id in sorted(grouped):
+        indices = grouped[recording_id]
+        unique_labels = {int(labels[index]) for index in indices}
+        if len(unique_labels) != 1:
+            raise ValueError(f"Inconsistent labels within recording {recording_id}")
+        output_labels.append(unique_labels.pop())
+        output_probabilities.append(
+            float(np.mean([probabilities[index] for index in indices]))
+        )
+        output_early.append(any(bool(early[index]) for index in indices))
+    return output_labels, output_probabilities, output_early
+
+
 def format_optional_metric(value: Any) -> str:
     """Format an unavailable numeric metric as N/A for logs and reports."""
     try:
