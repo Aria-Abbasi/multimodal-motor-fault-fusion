@@ -17,12 +17,25 @@ artifacts/logs/
 results/runs/
 *.pth
 
-# Ignore heavy datasets and generated tensors
+# Ignore raw, interim, and generated processed data
 data/raw/
-data/interim/
-data/processed/tensors/
+data/interim/*
+!data/interim/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
 *.pt
 
-# Ignore large archives (like the one we just downloaded)
+# Keep compact reproducibility CSVs, not generated inspection logs
+data/metadata/*
+!data/metadata/.gitkeep
+!data/metadata/metadata_master.csv
+!data/metadata/paderborn_channel_schema.csv
+!data/metadata/raw_manifest.csv
+
+data/splits/*
+!data/splits/.gitkeep
+!data/splits/*.csv
+
+# Ignore large archives
 *.zip
 *.tar.gz

@@ -1,5 +1,16 @@
 protocol,fold_id,split,n_rows,n_recording_id,n_base_recording_id,n_health_labels,health_label_counts,fault_family_counts,condition_counts
-cwru_leave_one_load_out,test_load_1,test,10,10,10,2,"{'fault': 9, 'healthy': 1}","{'bearing_ball': 3, 'bearing_inner_race': 3, 'bearing_outer_race': 3, 'healthy': 1}",{'load_1': 10}
+cwru_leave_one_load_out,test_load_0,test,4,4,4,2,"{'fault': 3, 'healthy': 1}","{'bearing_ball': 1, 'bearing_inner_race': 1, 'bearing_outer_race': 1, 'healthy': 1}",{'load_0': 4}
+cwru_leave_one_load_out,test_load_0,train,10,10,10,2,"{'fault': 9, 'healthy': 1}","{'bearing_ball': 3, 'bearing_inner_race': 3, 'bearing_outer_race': 3, 'healthy': 1}","{'load_3': 4, 'load_1': 3, 'load_2': 3}"
+cwru_leave_one_load_out,test_load_0,val,2,2,2,1,{'healthy': 2},{'healthy': 2},"{'load_1': 1, 'load_2': 1}"
+cwru_leave_one_load_out,test_load_1,test,4,4,4,2,"{'fault': 3, 'healthy': 1}","{'bearing_ball': 1, 'bearing_inner_race': 1, 'bearing_outer_race': 1, 'healthy': 1}",{'load_1': 4}
+cwru_leave_one_load_out,test_load_1,train,10,10,10,2,"{'fault': 9, 'healthy': 1}","{'bearing_ball': 3, 'bearing_inner_race': 3, 'bearing_outer_race': 3, 'healthy': 1}","{'load_3': 4, 'load_0': 3, 'load_2': 3}"
+cwru_leave_one_load_out,test_load_1,val,2,2,2,1,{'healthy': 2},{'healthy': 2},"{'load_0': 1, 'load_2': 1}"
+cwru_leave_one_load_out,test_load_2,test,4,4,4,2,"{'fault': 3, 'healthy': 1}","{'bearing_ball': 1, 'bearing_inner_race': 1, 'bearing_outer_race': 1, 'healthy': 1}",{'load_2': 4}
+cwru_leave_one_load_out,test_load_2,train,10,10,10,2,"{'fault': 9, 'healthy': 1}","{'bearing_ball': 3, 'bearing_inner_race': 3, 'bearing_outer_race': 3, 'healthy': 1}","{'load_3': 4, 'load_0': 3, 'load_1': 3}"
+cwru_leave_one_load_out,test_load_2,val,2,2,2,1,{'healthy': 2},{'healthy': 2},"{'load_0': 1, 'load_1': 1}"
+cwru_leave_one_load_out,test_load_3,test,4,4,4,2,"{'fault': 3, 'healthy': 1}","{'bearing_ball': 1, 'bearing_inner_race': 1, 'bearing_outer_race': 1, 'healthy': 1}",{'load_3': 4}
+cwru_leave_one_load_out,test_load_3,train,10,10,10,2,"{'fault': 9, 'healthy': 1}","{'bearing_ball': 3, 'bearing_inner_race': 3, 'bearing_outer_race': 3, 'healthy': 1}","{'load_2': 4, 'load_0': 3, 'load_1': 3}"
+cwru_leave_one_load_out,test_load_3,val,2,2,2,1,{'healthy': 2},{'healthy': 2},"{'load_0': 1, 'load_1': 1}"
 nln_emp_leave_one_speed_out,test_speed_100,test,51,51,26,2,"{'fault': 41, 'healthy': 10}","{'healthy': 10, 'looseness_soft_foot': 8, 'bearing_inner_race': 6, 'bearing_outer_race': 6, 'bearing_ball': 6, 'impeller_fault': 6, 'stator_winding_fault': 3, 'bearing_ball_spin': 2, 'bearing_contamination': 2, 'rotor_fault': 2}",{'motor_2_speed_100': 51}
 nln_emp_leave_one_speed_out,test_speed_100,train,154,154,78,2,"{'fault': 130, 'healthy': 24}","{'healthy': 24, 'misalignment': 22, 'cavitation': 14, 'unbalance': 14, 'looseness_soft_foot': 13, 'bearing_outer_race': 12, 'impeller_fault': 10, 'bearing_ball': 8, 'stator_winding_fault': 8, 'coupling_fault': 8, 'bearing_inner_race': 7, 'bearing_ball_spin': 4, 'bearing_contamination': 4, 'rotor_fault': 4, 'bent_shaft': 2}","{'motor_4_speed_70': 68, 'motor_2_speed_50': 44, 'motor_2_speed_75': 42}"
 nln_emp_leave_one_speed_out,test_speed_100,val,27,27,14,2,"{'fault': 23, 'healthy': 4}","{'bearing_inner_race': 4, 'bearing_ball': 4, 'healthy': 4, 'misalignment': 4, 'unbalance': 4, 'cavitation': 3, 'looseness_soft_foot': 2, 'impeller_fault': 2}","{'motor_4_speed_70': 11, 'motor_2_speed_75': 10, 'motor_2_speed_50': 6}"
