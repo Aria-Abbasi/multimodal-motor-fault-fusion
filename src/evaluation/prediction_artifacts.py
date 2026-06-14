@@ -75,7 +75,11 @@ def generate_prediction_artifacts(
         import matplotlib.pyplot as plt
         import seaborn as sns
         from sklearn.manifold import TSNE
-        from sklearn.metrics import confusion_matrix, roc_curve
+        from sklearn.metrics import (
+            confusion_matrix,
+            precision_recall_curve,
+            roc_curve,
+        )
     except ImportError:
         return written
 
@@ -150,6 +154,21 @@ def generate_prediction_artifacts(
         axis.set_ylabel("True positive rate")
         figure.tight_layout()
         path = output_dir / "fig_roc_curve.pdf"
+        figure.savefig(path, dpi=300, bbox_inches="tight")
+        plt.close(figure)
+        written.append(path)
+
+        precision, recall, _ = precision_recall_curve(
+            predictions["target"], predictions["fault_probability"]
+        )
+        prevalence = float(predictions["target"].mean())
+        figure, axis = plt.subplots(figsize=(6, 5))
+        axis.plot(recall, precision)
+        axis.axhline(prevalence, linestyle="--", color="grey")
+        axis.set_xlabel("Recall")
+        axis.set_ylabel("Precision")
+        figure.tight_layout()
+        path = output_dir / "fig_precision_recall_curve.pdf"
         figure.savefig(path, dpi=300, bbox_inches="tight")
         plt.close(figure)
         written.append(path)

@@ -42,9 +42,14 @@ SUMMARY_METRICS = (
     "recording_macro_f1",
     "validation_macro_f1",
     "validation_recording_macro_f1",
+    "validation_recording_fault_precision",
+    "validation_recording_early_fault_recall",
+    "validation_recording_mcc",
     "balanced_acc",
     "recording_balanced_acc",
     "accuracy",
+    "fault_precision",
+    "recording_fault_precision",
     "early_fault_recall",
     "auroc",
     "auprc",
@@ -297,6 +302,8 @@ def run_protocol_matrix(args: argparse.Namespace, protocol: str) -> None:
     )
 
     protocol_config = PROTOCOLS[protocol]
+    if bool(getattr(args, "require_cuda", False)) and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for this matrix but is not available")
     output_path = Path(args.output_file)
     if output_path.exists():
         existing_columns = pd.read_csv(output_path, nrows=1).columns
@@ -424,6 +431,7 @@ def run_protocol_matrix(args: argparse.Namespace, protocol: str) -> None:
                         shared_tensor_cache=shared_cache,
                         amp=args.amp,
                         smoke_test=args.smoke_test,
+                        require_cuda=args.require_cuda,
                         checkpoint_dir=args.checkpoint_dir,
                         write_detailed_metrics=False,
                         run_id=run_id,
@@ -528,6 +536,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="Fail before training instead of silently falling back to CPU.",
+    )
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument(
         "--output-file",

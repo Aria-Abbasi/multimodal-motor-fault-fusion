@@ -46,6 +46,16 @@ def test_nln_severity_one_has_valid_early_recall() -> None:
 
     assert metrics["early_fault_support"] == 2
     assert metrics["early_fault_recall"] == pytest.approx(0.5)
+
+
+def test_fault_precision_tracks_false_positive_collapse() -> None:
+    metrics = compute_binary_metrics(
+        targets=[0, 0, 0, 1],
+        predictions=[1, 1, 0, 1],
+        fault_probabilities=[0.8, 0.7, 0.2, 0.9],
+    )
+
+    assert metrics["fault_precision"] == pytest.approx(1 / 3)
     assert metrics["balanced_acc"] != metrics["accuracy"]
 
 

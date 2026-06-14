@@ -14,6 +14,7 @@ from src.training.result_store import read_current_results
 SUMMARY_METRICS = (
     "recording_macro_f1",
     "recording_balanced_acc",
+    "recording_fault_precision",
     "recording_early_fault_recall",
     "recording_auroc",
     "recording_auprc",

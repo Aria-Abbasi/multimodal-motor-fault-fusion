@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import copy
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 import os
 import random
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -35,7 +37,18 @@ from src.training.data_selection import select_label_budget  # noqa: E402
 
 
 DEFAULT_MODALITY_DROPOUT = 0.2
-PIPELINE_VERSION = "corrected_multimodal_v2"
+PIPELINE_VERSION = "corrected_multimodal_v3"
+
+
+@lru_cache(maxsize=1)
+def current_git_revision() -> str:
+    """Return the checked-out source revision for result provenance."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
 
 @dataclass
@@ -544,6 +557,8 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
     """Execute one configured training run and return its test metrics."""
     seed = int(getattr(args, "seed", 42))
     set_seed(seed)
+    if bool(getattr(args, "require_cuda", False)) and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for this run but is not available")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled = bool(getattr(args, "amp", True) and device.type == "cuda")
 
@@ -834,6 +849,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
     )
     result = {
         "pipeline_version": PIPELINE_VERSION,
+        "code_revision": current_git_revision(),
         "run_id": run_id,
         "paper_experiment": getattr(args, "paper_experiment", "matrix"),
         "protocol": getattr(args, "protocol", dataset_name),
@@ -847,6 +863,12 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         "fold_id": getattr(args, "fold_id", ""),
         "processed_dir": str(processed_dir),
         "seed": seed,
+        "device": str(device),
+        "gpu_name": (
+            torch.cuda.get_device_name(device) if device.type == "cuda" else "N/A"
+        ),
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda or "N/A",
         "ablation": ablation,
         "curriculum_requested": bool(getattr(args, "use_curriculum", True)),
         "curriculum": stage2_epochs > 0,
@@ -951,6 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--family-loss-weight", type=float, default=0.5)
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--require-cuda", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument(
         "--checkpoint-dir",

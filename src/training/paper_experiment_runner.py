@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import gc
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import torch
+import yaml
 
 from src.models.classical_baselines import CLASSICAL_BASELINE_NAMES
 from src.models.deep_baselines import DEEP_BASELINE_NAMES
@@ -25,12 +27,64 @@ from src.training.result_store import (
     result_completed,
 )
 from src.training.losses import LOSS_NAMES
-from src.training.train_multimodal import train_multimodal
-from src.training.train_multimodal import load_protocol_tensor_cache
+from src.training.train_multimodal import (
+    PIPELINE_VERSION,
+    load_protocol_tensor_cache,
+    train_multimodal,
+)
 
 
 PAPER_EXPERIMENTS = ("E1", "E2", "E3", "E4", "E5", "E6", "E7")
 BASELINE_MODELS = CLASSICAL_BASELINE_NAMES + DEEP_BASELINE_NAMES
+
+
+def current_git_revision() -> str:
+    """Return the source revision recorded with plans and results."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def resolve_frozen_configuration(
+    args: argparse.Namespace,
+) -> tuple[str, bool, str]:
+    """Load the validation-selected loss and gate, rejecting silent defaults."""
+    config_path = Path(args.frozen_config)
+    if config_path.exists():
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if payload.get("pipeline_version") != PIPELINE_VERSION:
+            raise ValueError(
+                f"{config_path} uses pipeline_version="
+                f"{payload.get('pipeline_version')!r}, expected {PIPELINE_VERSION!r}"
+            )
+        loss_name = str(payload.get("frozen_loss", ""))
+        gate_value = payload.get("frozen_gate")
+        if loss_name not in LOSS_NAMES or not isinstance(gate_value, bool):
+            raise ValueError(
+                f"{config_path} must contain a valid frozen_loss and boolean "
+                "frozen_gate"
+            )
+        if args.frozen_loss is not None and args.frozen_loss != loss_name:
+            raise ValueError("--frozen-loss conflicts with --frozen-config")
+        if args.frozen_gate is not None and args.frozen_gate != gate_value:
+            raise ValueError("--frozen-gate conflicts with --frozen-config")
+        return loss_name, gate_value, str(config_path)
+
+    if not args.allow_explicit_frozen_config:
+        raise FileNotFoundError(
+            f"Frozen pilot selection not found: {config_path}. Run "
+            "src.training.pilot_selection first. For diagnostic-only execution, "
+            "pass both --frozen-loss/--frozen-gate and "
+            "--allow-explicit-frozen-config."
+        )
+    if args.frozen_loss is None or args.frozen_gate is None:
+        raise ValueError(
+            "Explicit override requires both --frozen-loss and --frozen-gate"
+        )
+    return args.frozen_loss, args.frozen_gate, "explicit_override"
 
 
 @dataclass(frozen=True)
@@ -288,6 +342,7 @@ def _baseline_args(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         smoke_test=args.smoke_test,
+        require_cuda=args.require_cuda,
         checkpoint_dir=args.checkpoint_dir,
         run_id=job.run_id,
         paper_experiment=job.paper_experiment,
@@ -327,6 +382,7 @@ def _proposed_args(
         shared_tensor_cache=shared_cache,
         amp=args.amp,
         smoke_test=args.smoke_test,
+        require_cuda=args.require_cuda,
         checkpoint_dir=args.checkpoint_dir,
         write_detailed_metrics=False,
         run_id=job.run_id,
@@ -425,6 +481,8 @@ def execute_paper_jobs(
                     continue
                 reused = reusable_result(output_path, job, args)
                 if reused is not None:
+                    reused["code_revision"] = args.code_revision
+                    reused["frozen_config"] = args.frozen_config_source
                     print(
                         f"[{number}/{len(jobs)}] reuse "
                         f"{reused['source_run_id']} as {job.run_id}"
@@ -446,12 +504,16 @@ def execute_paper_jobs(
                     result["training_signature"] = training_signature(
                         job, args
                     )
+                    result["code_revision"] = args.code_revision
+                    result["frozen_config"] = args.frozen_config_source
                 except Exception as error:
                     result = {
                         **job.identity(),
                         "run_id": job.run_id,
                         "dataset": job.dataset,
                         "processed_dir": job.processed_dir,
+                        "code_revision": args.code_revision,
+                        "frozen_config": args.frozen_config_source,
                         "status": "FAILED",
                         "error": f"{type(error).__name__}: {error}",
                     }
@@ -484,10 +546,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
     parser.add_argument(
-        "--frozen-loss", choices=LOSS_NAMES, default="ce_1.0"
+        "--frozen-config", default="configs/frozen_l4_selection.yaml"
     )
     parser.add_argument(
-        "--frozen-gate", action=argparse.BooleanOptionalAction, default=True
+        "--frozen-loss", choices=LOSS_NAMES, default=None
+    )
+    parser.add_argument(
+        "--frozen-gate", action=argparse.BooleanOptionalAction, default=None
+    )
+    parser.add_argument(
+        "--allow-explicit-frozen-config",
+        action="store_true",
+        help="Allow diagnostic execution without a validation-selected YAML.",
     )
     parser.add_argument(
         "--strongest-baseline", choices=BASELINE_MODELS, default="cnn"
@@ -509,6 +579,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--family-loss-weight", type=float, default=0.5)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="Fail before training instead of silently falling back to CPU.",
+    )
     parser.add_argument("--allow-partial-folds", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -527,6 +602,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.require_cuda and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for this plan but is not available")
+    frozen_loss, frozen_gate, frozen_source = resolve_frozen_configuration(args)
+    args.frozen_loss = frozen_loss
+    args.frozen_gate = frozen_gate
+    args.frozen_config_source = frozen_source
+    args.code_revision = current_git_revision()
     experiments = tuple(args.experiments)
     training_experiments = tuple(
         experiment for experiment in experiments if experiment != "E7"
@@ -543,9 +625,20 @@ def main() -> None:
     )
     plan_path = Path(args.plan_file)
     plan_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([asdict(job) | {"run_id": job.run_id} for job in jobs]).to_csv(
-        plan_path, index=False
-    )
+    pd.DataFrame(
+        [
+            asdict(job)
+            | {
+                "run_id": job.run_id,
+                "frozen_loss": args.frozen_loss,
+                "frozen_gate": args.frozen_gate,
+                "frozen_config": args.frozen_config_source,
+                "pipeline_version": PIPELINE_VERSION,
+                "code_revision": args.code_revision,
+            }
+            for job in jobs
+        ]
+    ).to_csv(plan_path, index=False)
     print(f"Planned {len(jobs)} training jobs in {plan_path}")
     if not args.dry_run:
         execute_paper_jobs(jobs, args)

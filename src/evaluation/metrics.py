@@ -11,6 +11,7 @@ from sklearn.metrics import (
     balanced_accuracy_score,
     f1_score,
     matthews_corrcoef,
+    precision_score,
     roc_auc_score,
 )
 
@@ -97,6 +98,9 @@ def compute_binary_metrics(
             else float("nan")
         ),
         "accuracy": float((y_true == y_pred).mean()),
+        "fault_precision": float(
+            precision_score(y_true, y_pred, pos_label=1, zero_division=0)
+        ),
         "early_fault_recall": early_recall,
         "early_fault_support": early_count,
         "early_fault_recall_available": bool(early_count),

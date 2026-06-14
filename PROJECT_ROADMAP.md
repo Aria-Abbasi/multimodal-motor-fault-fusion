@@ -5,7 +5,9 @@ Last verified: June 14, 2026
 Preprocessing provenance revision:
 `420407a2695779ebf38a0ed7b321a7729498cc4c`
 
-Pipeline version: `corrected_multimodal_v2`
+GPU training pipeline version: `corrected_multimodal_v3`
+
+Audited preprocessing/smoke provenance version: `corrected_multimodal_v2`
 
 ## Final Goal
 
@@ -31,13 +33,17 @@ be made only when the corrected experiments support them.
   jobs. Committing and pushing afterward therefore did not invalidate the
   generated tensors.
 - A real-data smoke-selection regression test was added after the CPU smoke
-  run exposed contiguous single-class sampling. The complete local and
-  CPU-server suites now pass **47 tests**.
+  run exposed contiguous single-class sampling. The current local suite passes
+  **52 tests**; the same revision must pass on the L4 before training.
 - Synthetic CPU tests cover all model families and E1-E7 experiment paths.
 - Legacy result files are marked as unusable and are rejected when they lack
   the current `pipeline_version`.
 - Generated processed data and transient inspection logs are no longer tracked
   by Git. Corrected compact metadata and split CSVs remain versioned.
+- GPU runs now fail when `--require-cuda` is set and CUDA is unavailable,
+  preventing accidental CPU fallback.
+- The pilot configuration is frozen by a validation-only selector and the
+  final runner rejects missing or incompatible frozen-selection YAML.
 
 ### Raw data and protocols
 
@@ -123,6 +129,8 @@ This is sufficient for the remaining provenance and transfer work.
 - Optional dynamic current-modality gating.
 - AdamW weight decay, warmup/cosine scheduling, and gradient clipping.
 - Validation-derived recording thresholds and complete recording metrics.
+- Fault precision at window and recording level, explicitly tracking the
+  false-positive failure mode.
 - Safe `N/A` early recall when Paderborn has no granular early-severity labels.
 - Five fixed seeds: 42, 123, 999, 7, and 88.
 - Resume-safe E1-E7 planning and versioned result banking.
@@ -162,23 +170,36 @@ folds it records **2,003,187 tensors**, with no count mismatches.
 
 ## L4 Validation Pilot
 
-1. Synchronize the clean canonical repository revision to the L4 server.
-2. Transfer or attach the audited processed-data tree.
-3. Run all tests and one GPU smoke job.
-4. Run the 12 loss-by-gate configurations on NLN-EMP using seed 42 across all
+Verified infrastructure:
+
+- one standard NVIDIA L4 quota in `europe-west4`;
+- L4 and `g2-standard-16` availability in `europe-west4-c`;
+- existing 350 GB persistent data disk in `europe-west4-c`;
+- 126.4 GiB processed tree and about 81 GB currently free.
+
+Execution:
+
+1. Push the complete v3 readiness revision to GitHub.
+2. Snapshot the 350 GB data disk.
+3. Stop the CPU VM, detach its non-boot data disk, and attach it to a
+   `g2-standard-16` L4 VM in `europe-west4-c`.
+4. Run all tests, `scripts/l4_preflight.py --full-tensor-count`, and one GPU
+   smoke job with `--require-cuda`.
+5. Run the 12 loss-by-gate configurations on NLN-EMP using seed 42 across all
    four folds. This is 12 configurations and 48 fold-level training jobs.
-5. Select exactly one loss/gate configuration using validation recording
-   metrics only.
+6. Run `src.training.pilot_selection` with the predeclared 0.95 minimum
+   validation recording early-fault recall.
+7. Review and commit `configs/frozen_l4_selection.yaml`.
 
 Selection rule:
 
 1. primary metric: validation recording Macro F1;
-2. constraint: acceptable validation early-fault recall;
+2. constraint: validation recording early-fault recall >= 0.95;
 3. tie-breakers: precision, MCC, and fold stability.
 
-Pilot test metrics must not influence configuration selection. Record the
-frozen loss, gate state, threshold policy, selection rule, Git revision, and
-pipeline version before final training.
+Pilot test metrics must not influence configuration selection. The selector
+records the loss, gate state, threshold policy, selection rule, source-results
+checksum, Git revision, and pipeline version before final training.
 
 ## L4 Final Experiments
 
@@ -187,13 +208,15 @@ Generate and inspect the dry-run plan before training:
 ```bash
 python -m src.training.paper_experiment_runner \
   --experiments E1 E2 E3 E4 E5 E6 E7 \
-  --frozen-loss FROZEN_LOSS \
-  --frozen-gate \
+  --frozen-config configs/frozen_l4_selection.yaml \
+  --require-cuda \
+  --cache-max-gb 48 \
   --dry-run \
   --plan-file results/tables/final_experiment_plan.csv
 ```
 
-Use `--no-frozen-gate` if validation selects gate off.
+The expected plan has 525 result rows and 425 unique training signatures after
+cross-experiment reuse.
 
 Then execute E1-E6 across all required folds and five seeds. Generate E7 only
 from validation-selected checkpoints.
@@ -225,9 +248,20 @@ After all planned result cells are present:
 A p-value below 0.05 is supporting evidence, not a license to selectively
 rerun seeds or configurations.
 
+Publication work still required after GPU training, beyond the original
+`m5.md` checklist:
+
+- report 95% confidence intervals and paired effect sizes alongside corrected
+  p-values;
+- create the framework and split-protocol diagrams from the frozen methods;
+- include both ROC and precision-recall curves;
+- report calibrated decision thresholds and gate-value distributions;
+- document compute energy/runtime, failure handling, and the defective
+  Paderborn recording as reproducibility limitations.
+
 ## Go/No-Go Checklist
 
-- [x] Corrected code is committed and synchronized.
+- [ ] The v3 L4-readiness code is committed and synchronized.
 - [x] Local and CPU-server test suites pass.
 - [x] NLN physical sensor channels are documented and frozen.
 - [x] Raw files and checksums are validated.
@@ -239,6 +273,8 @@ rerun seeds or configurations.
 - [x] Paderborn artificial-to-natural tensors are generated and audited.
 - [x] The real-data CPU smoke suite passes.
 - [x] Preprocessing provenance is frozen and archived.
+- [x] L4 quota, zone availability, disk, and experiment counts are verified.
+- [x] Validation-only pilot freezing and CUDA preflight safeguards are implemented.
 - [ ] The loss and gate are frozen from validation data only.
 - [ ] E1-E6 contain every planned fold and seed.
 - [ ] E7 uses validation-selected checkpoints.
@@ -248,5 +284,5 @@ rerun seeds or configurations.
 
 ## Immediate Next Action
 
-Push the smoke-sampling fix and this roadmap update to GitHub, then provision
-the L4 server and begin the 12-configuration validation pilot.
+Push the v3 L4-readiness revision to GitHub, snapshot/move the existing data
+disk to a `g2-standard-16` VM, and run the L4 preflight.

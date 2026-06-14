@@ -37,6 +37,7 @@ from src.training.train_multimodal import (
     MultimodalDataset,
     PIPELINE_VERSION,
     build_family_mapping,
+    current_git_revision,
     make_loader,
     select_index_splits,
     set_seed,
@@ -337,6 +338,8 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
     """Train one baseline with no implicit train/validation/test subsampling."""
     if args.model not in BASELINE_NAMES:
         raise ValueError(f"Unknown baseline {args.model}")
+    if bool(getattr(args, "require_cuda", False)) and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for this run but is not available")
     set_seed(args.seed)
     processed_dir = Path(args.processed_dir)
     index = pd.read_csv(processed_dir / "windows_index.csv")
@@ -379,6 +382,7 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
         )
     return {
         "pipeline_version": PIPELINE_VERSION,
+        "code_revision": current_git_revision(),
         "run_id": args.run_id,
         "paper_experiment": args.paper_experiment,
         "protocol": args.protocol,
@@ -387,6 +391,12 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "configuration": args.configuration,
         "seed": args.seed,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "gpu_name": (
+            torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+        ),
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda or "N/A",
         "label_budget": args.label_budget,
         "modality": args.modality,
         "n_train_windows": len(train),

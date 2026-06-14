@@ -28,6 +28,7 @@ All split logic must be recording-level and leakage-safe.
 
 - Macro F1
 - Balanced accuracy
+- Fault precision
 - Early-fault recall (central paper metric)
 - AUROC
 - AUPRC
@@ -77,53 +78,37 @@ python -m src.data.build_spectrograms \
   --tensor-dtype float16
 ```
 
-Run the full NLN-EMP loss/gate matrix
-(`4 folds x 12 configurations x 5 seeds = 240 jobs`):
+Run the validation pilot
+(`4 folds x 12 configurations x 1 seed = 48 jobs`):
 
 ```bash
 python -m src.training.experiment_runner \
   --protocol nln_emp \
-  --output-file results/tables/corrected_nln_loss_gate_results.csv \
-  --summary-file results/tables/corrected_nln_loss_gate_summary.csv
+  --seeds 42 \
+  --require-cuda \
+  --cache-max-gb 48 \
+  --output-file results/tables/nln_validation_pilot.csv \
+  --summary-file results/tables/nln_validation_pilot_summary.csv \
+  --checkpoint-dir artifacts/checkpoints/nln_validation_pilot \
+  --fail-fast
 ```
 
-The raw CSV contains one row per fold/configuration/seed. The summary CSV
-reports mean and sample standard deviation across all fold-seed runs for each
-configuration. Resume checks also use the fold ID, so completing one held-out
-speed never suppresses another.
-
-Build and run the Paderborn artificial-to-natural protocol:
+Freeze one configuration using validation metrics only:
 
 ```bash
-python -m src.data.build_spectrograms \
-  --split-file data/splits/paderborn_artificial_to_natural.csv \
-  --dataset paderborn
+python -m src.training.pilot_selection \
+  --results results/tables/nln_validation_pilot.csv \
+  --output configs/frozen_l4_selection.yaml \
+  --minimum-early-recall 0.95
 ```
 
-```bash
-python -m src.training.experiment_runner \
-  --protocol paderborn_artificial_to_natural \
-  --output-file results/tables/paderborn_loss_gate_matrix_results.csv
-```
+The pilot selector requires all 48 rows and never reads test metrics for
+configuration selection.
 
-Because Paderborn bearing IDs are not severity annotations, Paderborn runs use
-standard cross-entropy only. The runner evaluates gate off/on across five
-seeds (10 jobs per Paderborn protocol) and reports early-fault recall as `N/A`.
-
-Run complete NLN-EMP and then Paderborn in one process. The runner caches and
-releases one fold at a time:
-
-```bash
-python -m src.training.experiment_runner \
-  --protocols nln_emp paderborn_condition_generalization paderborn_artificial_to_natural \
-  --cache-max-gb 36 \
-  --output-file results/tables/corrected_loss_gate_matrix_results.csv
-```
-
-The runner resumes at seed level. Paderborn early-fault recall is reported as
-`N/A` when the test metadata has no granular severity labels. Missing expected
-folds stop execution by default; `--allow-partial-folds` is intended only for
-explicit debugging.
+The final runner transfers the validation-frozen NLN loss and gate to the
+Paderborn protocols. Fixed early-fault CE multipliers are inactive where
+Paderborn has no early-severity annotation; focal loss remains focal if it is
+the frozen choice. Paderborn early-fault recall is reported as `N/A`.
 
 Run tests:
 
@@ -138,8 +123,9 @@ Inspect the complete E1-E7 training plan without launching jobs:
 ```bash
 python -m src.training.paper_experiment_runner \
   --dry-run \
-  --frozen-loss ce_1.0 \
-  --frozen-gate
+  --frozen-config configs/frozen_l4_selection.yaml \
+  --require-cuda \
+  --cache-max-gb 48
 ```
 
 After selecting and freezing the loss/gate configuration using validation
@@ -148,8 +134,9 @@ results, execute the full resumable plan:
 ```bash
 python -m src.training.paper_experiment_runner \
   --experiments E1 E2 E3 E4 E5 E6 E7 \
-  --frozen-loss FROZEN_LOSS \
-  --frozen-gate \
+  --frozen-config configs/frozen_l4_selection.yaml \
+  --require-cuda \
+  --cache-max-gb 48 \
   --output-file results/tables/corrected_paper_experiments.csv \
   --fail-fast
 ```
@@ -182,7 +169,18 @@ python scripts/download_cwru_benchmark.py --validate-only
 ```
 
 Files in `results/tables` and `results/figures` that predate
-`corrected_multimodal_v2` are legacy artifacts and must not be used.
+`corrected_multimodal_v3` are legacy artifacts and must not be used for final
+GPU results. The audited preprocessing archive separately records the v2 CPU
+data-generation provenance.
+
+Before the validation pilot, run:
+
+```bash
+python scripts/l4_preflight.py --full-tensor-count
+```
+
+See [docs/cloud_runbook.md](docs/cloud_runbook.md) for the disk-transfer,
+preflight, pilot, freeze, and final-run sequence.
 
 For a CPU-only local environment, install PyTorch from its CPU wheel index:
 

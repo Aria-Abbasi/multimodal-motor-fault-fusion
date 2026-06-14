@@ -1,6 +1,7 @@
 project:
   name: early-fault-fusion-paper
   experiment_name: multimodal-motor-fault-fusion
+  pipeline_version: corrected_multimodal_v3
 
 runtime:
   seed: 42
@@ -76,6 +77,7 @@ evaluation:
   metrics:
     - macro_f1
     - balanced_accuracy
+    - fault_precision
     - early_fault_recall
     - auroc
     - auprc
