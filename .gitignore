@@ -14,7 +14,9 @@ venv/
 # Ignore Model Weights and Logs
 artifacts/checkpoints/
 artifacts/logs/
+artifacts/provenance/
 results/runs/
+results/tables/real_data_cpu_smoke*.csv
 *.pth
 
 # Ignore raw, interim, and generated processed data

@@ -30,7 +30,9 @@ be made only when the corrected experiments support them.
 - Those files were present on the server before the completed preprocessing
   jobs. Committing and pushing afterward therefore did not invalidate the
   generated tensors.
-- The complete local and CPU-server test suites pass: **46 tests**.
+- A real-data smoke-selection regression test was added after the CPU smoke
+  run exposed contiguous single-class sampling. The complete local and
+  CPU-server suites now pass **47 tests**.
 - Synthetic CPU tests cover all model families and E1-E7 experiment paths.
 - Legacy result files are marked as unusable and are rejected when they lack
   the current `pipeline_version`.
@@ -67,7 +69,7 @@ be made only when the corrected experiments support them.
 | CWRU leave-one-load-out | 4/4 | 1,521 | 406 MB total | Passed |
 | NLN leave-one-speed-out | 4/4 | 101,732 | 27 GB total | Passed |
 | Paderborn condition generalization | 4/4 | 318,035 | 83 GB total | Passed |
-| Paderborn artificial-to-natural | 0/1 | Not generated | About 21 GB expected | Pending |
+| Paderborn artificial-to-natural | 1/1 | 318,035 | 21 GB total | Passed |
 
 The completed Paderborn condition folds were checked for:
 
@@ -79,6 +81,16 @@ The completed Paderborn condition folds were checked for:
 - train-only normalization;
 - zero base-recording overlap;
 - zero preprocessing exclusions.
+
+The Paderborn artificial-to-natural protocol was checked for:
+
+- exactly 318,035 indexed and physical tensors;
+- FP16 tensor shape `(2, 128, 128)` and finite sampled tensors;
+- train-only normalization from 1,087 training recordings;
+- artificial faults only in train/validation;
+- real-damage faults only in test;
+- zero base-recording overlap;
+- zero preprocessing errors or exclusions.
 
 The completed NLN folds have four documented missing-modality exclusions per
 fold:
@@ -96,11 +108,10 @@ At the latest check:
 
 - raw data: about 105 GB;
 - interim data and retained archives: about 20 GB;
-- corrected processed data: about 110 GB;
-- free disk space: about 102 GB.
+- corrected processed data: about 131 GB;
+- free disk space: about 81 GB.
 
-This is sufficient for the remaining Paderborn artificial-to-natural tensors
-and the CPU smoke outputs.
+This is sufficient for the remaining provenance and transfer work.
 
 ## Completed Software Work
 
@@ -119,83 +130,35 @@ and the CPU smoke outputs.
 - E7 Grad-CAM, saliency, and cross-attention artifact generation.
 - Paired fold/seed statistics and validation-only checkpoint selection.
 
-## Remaining CPU Work
+## CPU Phase Complete
 
-### 1. Generate Paderborn artificial-to-natural tensors
+The real-data CPU smoke suite completed all **105 planned jobs** using seed 42:
 
-Run on the CPU server:
+- E1: 32 jobs;
+- E2: 16 jobs;
+- E3: 12 jobs;
+- E4: 12 jobs;
+- E5: 1 job;
+- E6: 32 jobs.
 
-```bash
-mkdir -p data/interim/preprocess_logs/paderborn_artificial_to_natural
+All jobs completed, all required metrics were finite, no run IDs were missing
+or duplicated, and every row used `corrected_multimodal_v2`. Paderborn and
+CWRU early recall were unavailable rather than incorrectly reported as zero.
+These smoke metrics verify execution only and must not be used as paper
+results.
 
-nohup bash -lc '
-  cd /home/Aria/data/multimodal-motor-fault-fusion
-  source .venv/bin/activate
-  python -m src.data.build_spectrograms \
-    --split-file data/splits/paderborn_artificial_to_natural.csv \
-    --dataset paderborn \
-    --tensor-dtype float16
-  code=$?
-  echo "$code" > \
-    data/interim/preprocess_logs/paderborn_artificial_to_natural/run.exit
-  exit "$code"
-' > data/interim/preprocess_logs/paderborn_artificial_to_natural/run.log 2>&1 &
-```
+Preprocessing and smoke provenance is frozen in:
 
-Check progress directly, without a sleep loop:
+`artifacts/provenance/preprocessing_20260614.tar.gz`
 
-```bash
-tail -c 300 \
-  data/interim/preprocess_logs/paderborn_artificial_to_natural/run.log |
-  tr '\r' '\n' | tail -1
+Archive SHA-256:
 
-cat data/interim/preprocess_logs/paderborn_artificial_to_natural/run.exit
-```
+`aea7de39edef3bf27a9c4bbc1bf64eb9bde3992c9ff1221f3f9b486be24a4933`
 
-Acceptance checks:
-
-- exit code is zero;
-- manifest, normalization statistics, paired recordings, and index exist;
-- tensor count equals index row count;
-- sampled tensors are FP16, finite, and shaped `(2, 128, 128)`;
-- artificial recordings occur only in train/validation;
-- natural recordings occur only in test;
-- no base recording crosses splits.
-
-### 2. Run the real-data CPU smoke suite
-
-After the artificial-to-natural audit:
-
-```bash
-python -m pytest -q
-
-python -m src.training.paper_experiment_runner \
-  --experiments E1 E2 E3 E4 E5 E6 \
-  --seeds 42 \
-  --smoke-test \
-  --no-amp \
-  --allow-partial-folds \
-  --output-file results/tables/real_data_cpu_smoke.csv \
-  --fail-fast
-```
-
-The partial-fold option is permitted only for this smoke test. Confirm that all
-protocol/model paths complete, metrics contain no unexpected NaN values, and
-Paderborn early recall is reported as unavailable when severity labels are
-absent.
-
-### 3. Freeze preprocessing provenance
-
-Archive:
-
-- canonical Git revision and pipeline version;
-- raw-data manifest and checksums;
-- metadata and split validation reports;
-- preprocessing manifests and normalization statistics;
-- exclusions and preprocessing logs;
-- processed fold sizes and tensor/index counts.
-
-Do not move to paid GPU training until these CPU checks are complete.
+The archive contains the raw manifest, metadata, splits, preprocessing
+manifests, normalization statistics, pairing/exclusion records, logs, smoke
+plan/results, source hashes, and a 13-fold tensor/index inventory. Across all
+folds it records **2,003,187 tensors**, with no count mismatches.
 
 ## L4 Validation Pilot
 
@@ -273,9 +236,9 @@ rerun seeds or configurations.
 - [x] NLN corrected folds are generated and audited.
 - [x] Paderborn condition folds are generated and audited.
 - [x] Generated data is removed from Git tracking.
-- [ ] Paderborn artificial-to-natural tensors are generated and audited.
-- [ ] The real-data CPU smoke suite passes.
-- [ ] Preprocessing provenance is frozen and archived.
+- [x] Paderborn artificial-to-natural tensors are generated and audited.
+- [x] The real-data CPU smoke suite passes.
+- [x] Preprocessing provenance is frozen and archived.
 - [ ] The loss and gate are frozen from validation data only.
 - [ ] E1-E6 contain every planned fold and seed.
 - [ ] E7 uses validation-selected checkpoints.
@@ -285,5 +248,5 @@ rerun seeds or configurations.
 
 ## Immediate Next Action
 
-Generate and audit the single Paderborn artificial-to-natural processed
-dataset, then run the real-data CPU smoke suite.
+Push the smoke-sampling fix and this roadmap update to GitHub, then provision
+the L4 server and begin the 12-configuration validation pilot.
