@@ -61,7 +61,7 @@ training:
 preprocessing:
   tensor_dtype: float16
   nln_alignment_policy: condition_level_weak_alignment
-  nln_vibration_channel: null
+  nln_vibration_channel: 2
   nln_current_channels:
     - 1
     - 2

@@ -25,6 +25,7 @@ from .preprocessing_config import (
 from .signal_io import (
     NLN_DEFAULT_CURRENT_CHANNELS,
     NLN_DEFAULT_VIBRATION_CHANNEL,
+    NLNSignalCache,
     load_recording_signals,
     nln_measurement_columns,
     select_nln_channel_paths,
@@ -171,12 +172,14 @@ def _load_row(
     dataset: str,
     vibration_channel: int,
     current_channels: tuple[int, ...],
+    nln_cache: NLNSignalCache | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     return load_recording_signals(
         row.to_dict(),
         dataset,
         nln_vibration_channel=vibration_channel,
         nln_current_channels=current_channels,
+        nln_cache=nln_cache,
     )
 
 
@@ -263,10 +266,15 @@ def build_fold_spectrograms(
     square_sums = {"vibration": 0.0, "current": 0.0}
     counts = {"vibration": 0, "current": 0}
     valid_train_recordings = 0
+    nln_cache = NLNSignalCache() if dataset == "nln_emp" else None
     for _, row in tqdm(train.iterrows(), total=len(train), desc="Train statistics"):
         try:
             vibration, current = _load_row(
-                row, dataset, vibration_channel, current_channels
+                row,
+                dataset,
+                vibration_channel,
+                current_channels,
+                nln_cache,
             )
             windows = list(_iter_window_pairs(vibration, current))
             if not windows:
@@ -314,10 +322,15 @@ def build_fold_spectrograms(
 
     index_rows: list[dict[str, Any]] = []
     global_index = 0
+    nln_cache = NLNSignalCache() if dataset == "nln_emp" else None
     for _, row in tqdm(rows.iterrows(), total=len(rows), desc="Spectrograms"):
         try:
             vibration, current = _load_row(
-                row, dataset, vibration_channel, current_channels
+                row,
+                dataset,
+                vibration_channel,
+                current_channels,
+                nln_cache,
             )
             pairs = _iter_window_pairs(vibration, current)
             saved_for_recording = 0
@@ -379,11 +392,11 @@ def build_fold_spectrograms(
     manifest = {
         "dataset": dataset,
         "fold_id": fold_id,
-        "alignment_policy": (
-            "condition_level_weak_alignment"
-            if dataset == "nln_emp"
-            else "synchronized_channels"
-        ),
+        "alignment_policy": {
+            "nln_emp": "condition_level_weak_alignment",
+            "paderborn": "synchronized_channels",
+            "cwru": "vibration_only",
+        }[dataset],
         "window_size": WINDOW_SIZE,
         "window_overlap": WINDOW_OVERLAP,
         "stft_nperseg": STFT_NPERSEG,
@@ -394,7 +407,11 @@ def build_fold_spectrograms(
         "nln_current_channels": (
             list(current_channels) if dataset == "nln_emp" else None
         ),
-        "current_representation": "mean_of_phase_log_magnitude_spectrograms",
+        "current_representation": (
+            "not_applicable"
+            if dataset == "cwru"
+            else "mean_of_phase_log_magnitude_spectrograms"
+        ),
         "recordings_input": len(dataframe),
         "paired_measurements": len(rows),
         "excluded_base_recordings": len(exclusions),

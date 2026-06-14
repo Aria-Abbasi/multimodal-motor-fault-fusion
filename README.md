@@ -72,7 +72,7 @@ python -m src.data.build_spectrograms \
   --split-file data/splits/nln_emp_leave_one_speed_out.csv \
   --dataset nln_emp \
   --all-folds \
-  --nln-vibration-channel VERIFIED_CHANNEL \
+  --nln-vibration-channel 2 \
   --nln-current-channels 1 2 3 \
   --tensor-dtype float16
 ```

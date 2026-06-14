@@ -11,6 +11,7 @@ from src.data.preprocessing_config import (
     WINDOW_OVERLAP,
     WINDOW_SIZE,
 )
+from src.data.signal_io import NLN_DEFAULT_VIBRATION_CHANNEL
 from src.training.train_multimodal import DEFAULT_MODALITY_DROPOUT
 
 
@@ -21,6 +22,7 @@ def test_preprocessing_constants_match_project_plan() -> None:
     assert STFT_NOVERLAP == 128
     assert SPECTROGRAM_SIZE == (128, 128)
     assert DEFAULT_MODALITY_DROPOUT == 0.2
+    assert NLN_DEFAULT_VIBRATION_CHANNEL == 2
 
 
 def test_all_folds_are_selected_without_mixing_rows() -> None:

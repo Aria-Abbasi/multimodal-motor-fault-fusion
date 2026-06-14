@@ -11,7 +11,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from src.data.build_spectrograms import pair_nln_rows
-from src.data.signal_io import load_recording_signals
+from src.data.signal_io import NLNSignalCache, load_recording_signals
 from src.evaluation.metrics import (
     aggregate_recording_predictions,
     select_decision_threshold,
@@ -79,8 +79,51 @@ def test_nln_pairing_uses_separate_branches_and_phase_channels(
     )
     assert vibration.shape == (32,)
     assert current.shape == (3, 32)
-    assert vibration[0] == pytest.approx(10)
+    assert vibration[0] == pytest.approx(20)
     assert current[:, 0].tolist() == pytest.approx([100, 200, 300])
+
+
+def test_nln_cache_reads_each_selected_csv_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vibration_paths = []
+    current_paths = []
+    for channel in range(1, 6):
+        path = tmp_path / "Vibration" / f"sample-ch{channel}.csv"
+        _write_channel(path, channel * 10)
+        vibration_paths.append(path)
+    for channel in range(1, 7):
+        path = tmp_path / "Electric" / f"sample-ch{channel}.csv"
+        _write_channel(path, channel * 100)
+        current_paths.append(path)
+
+    rows = [
+        {
+            "vibration_source_path": "|".join(map(str, vibration_paths)),
+            "current_source_path": "|".join(map(str, current_paths)),
+            "measurement_column": column,
+        }
+        for column in ("0", "1")
+    ]
+    original_read_csv = pd.read_csv
+    reads: list[Path] = []
+
+    def counted_read_csv(path: Path, *args: object, **kwargs: object) -> pd.DataFrame:
+        reads.append(Path(path))
+        return original_read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", counted_read_csv)
+    cache = NLNSignalCache()
+    for row in rows:
+        load_recording_signals(row, "nln_emp", nln_cache=cache)
+
+    assert len(reads) == 4
+    assert set(reads) == {
+        vibration_paths[1],
+        current_paths[0],
+        current_paths[1],
+        current_paths[2],
+    }
 
 
 def test_attention_operates_on_multiple_spatial_tokens() -> None:

@@ -33,9 +33,9 @@ python -m src.data.generate_splits
 python scripts/validate_splits.py
 ```
 
-Before NLN preprocessing, verify the physical sensor represented by the
-selected vibration channel against the dataset sensor-location appendix. Put
-that channel number in `configs/base.yaml` and pass it explicitly below.
+NLN vibration channel 2 is frozen from the dataset README: electric-motor
+driven-end bearing, vertical. The selection rationale is recorded in
+`docs/nln_sensor_selection.md`.
 
 Build corrected tensors:
 
@@ -44,7 +44,7 @@ python -m src.data.build_spectrograms \
   --split-file data/splits/nln_emp_leave_one_speed_out.csv \
   --dataset nln_emp \
   --all-folds \
-  --nln-vibration-channel VERIFIED_CHANNEL \
+  --nln-vibration-channel 2 \
   --nln-current-channels 1 2 3 \
   --tensor-dtype float16
 

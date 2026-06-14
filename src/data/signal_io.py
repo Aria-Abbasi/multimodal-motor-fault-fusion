@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -11,10 +12,56 @@ import pandas as pd
 import scipy.io as sio
 
 
-NLN_DEFAULT_VIBRATION_CHANNEL = 1
+NLN_DEFAULT_VIBRATION_CHANNEL = 2
 NLN_DEFAULT_CURRENT_CHANNELS = (1, 2, 3)
 PADERBORN_VIBRATION_CHANNEL = "vibration_1"
 PADERBORN_CURRENT_CHANNELS = ("phase_current_1", "phase_current_2")
+
+
+@dataclass
+class NLNSignalCache:
+    """Cache all measurement columns for one NLN condition at a time."""
+
+    _signature: tuple[str, ...] | None = None
+    _channels: dict[Path, dict[str, np.ndarray]] = field(default_factory=dict)
+
+    def load(
+        self,
+        row: Mapping[str, Any],
+        vibration_channel: int,
+        current_channels: Sequence[int],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        vibration_paths = select_nln_channel_paths(
+            row["vibration_source_path"], (vibration_channel,)
+        )
+        current_paths = select_nln_channel_paths(
+            row["current_source_path"], tuple(current_channels)
+        )
+        paths = vibration_paths + current_paths
+        signature = tuple(str(path) for path in paths)
+        if signature != self._signature:
+            self._channels = {
+                path: _read_nln_measurements(path)
+                for path in paths
+            }
+            self._signature = signature
+
+        measurement_column = str(row["measurement_column"])
+        missing = [
+            str(path)
+            for path in paths
+            if measurement_column not in self._channels[path]
+        ]
+        if missing:
+            raise ValueError(
+                f"NLN measurement column {measurement_column!r} is missing "
+                f"from {missing}"
+            )
+        vibration = self._channels[vibration_paths[0]][measurement_column]
+        current = np.stack(
+            [self._channels[path][measurement_column] for path in current_paths]
+        )
+        return vibration, current
 
 
 def _path_list(value: Any) -> list[Path]:
@@ -70,16 +117,29 @@ def nln_measurement_columns(paths: Sequence[Path]) -> tuple[str, ...]:
     return tuple(sorted(shared, key=sort_key))
 
 
-def _read_nln_column(path: Path, measurement_column: str) -> np.ndarray:
+def _read_nln_measurements(path: Path) -> dict[str, np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(f"Missing NLN channel file: {path}")
-    frame = pd.read_csv(path, usecols=[measurement_column])
-    values = pd.to_numeric(frame[measurement_column], errors="coerce").to_numpy()
-    if not np.isfinite(values).all():
+    frame = pd.read_csv(path)
+    measurement_columns = [
+        str(column)
+        for column in frame.columns
+        if str(column).strip().lower()
+        not in {"time", "timestamp", "index", "unnamed: 0"}
+    ]
+    if not measurement_columns:
+        raise ValueError(f"No measurement columns found in {path}")
+    numeric = frame[measurement_columns].apply(
+        pd.to_numeric, errors="coerce"
+    ).to_numpy(dtype=np.float32, copy=False)
+    if not np.isfinite(numeric).all():
         raise ValueError(
-            f"Non-numeric or missing values in {path}, column={measurement_column}"
+            f"Non-numeric or missing measurement values in {path}"
         )
-    return values.astype(np.float32, copy=False)
+    return {
+        column: numeric[:, index]
+        for index, column in enumerate(measurement_columns)
+    }
 
 
 def _matlab_string(value: Any) -> str:
@@ -116,6 +176,7 @@ def load_recording_signals(
     *,
     nln_vibration_channel: int = NLN_DEFAULT_VIBRATION_CHANNEL,
     nln_current_channels: Sequence[int] = NLN_DEFAULT_CURRENT_CHANNELS,
+    nln_cache: NLNSignalCache | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Load vibration and current.
 
@@ -129,18 +190,12 @@ def load_recording_signals(
     if dataset_name == "nln_emp":
         if not row:
             raise TypeError("NLN loading requires a paired metadata row")
-        vibration_paths = select_nln_channel_paths(
-            row["vibration_source_path"], (nln_vibration_channel,)
+        cache = nln_cache or NLNSignalCache()
+        return cache.load(
+            row,
+            vibration_channel=nln_vibration_channel,
+            current_channels=nln_current_channels,
         )
-        current_paths = select_nln_channel_paths(
-            row["current_source_path"], tuple(nln_current_channels)
-        )
-        measurement_column = str(row["measurement_column"])
-        vibration = _read_nln_column(vibration_paths[0], measurement_column)
-        current = np.stack(
-            [_read_nln_column(path, measurement_column) for path in current_paths]
-        )
-        return vibration, current
 
     path = Path(row.get("source_path", source))
     if dataset_name == "paderborn":
