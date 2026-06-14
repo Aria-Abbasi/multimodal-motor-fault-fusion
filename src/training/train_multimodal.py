@@ -165,10 +165,48 @@ def select_index_splits(
         raise ValueError("Both train and test splits must contain samples")
 
     if smoke_test:
-        train_dataframe = train_dataframe.head(64)
-        validation_dataframe = validation_dataframe.head(64)
-        test_dataframe = test_dataframe.head(64)
+        train_dataframe = _select_smoke_rows(train_dataframe)
+        validation_dataframe = _select_smoke_rows(validation_dataframe)
+        test_dataframe = _select_smoke_rows(test_dataframe)
     return train_dataframe, validation_dataframe, test_dataframe
+
+
+def _select_smoke_rows(
+    dataframe: pd.DataFrame, maximum_rows: int = 64
+) -> pd.DataFrame:
+    """Select a small deterministic subset spanning classes and recordings."""
+    if len(dataframe) <= maximum_rows:
+        return dataframe.copy()
+
+    recording_column = (
+        "base_recording_id"
+        if "base_recording_id" in dataframe.columns
+        else "recording_id"
+    )
+    labels = sorted(dataframe["health_label"].astype(str).unique())
+    rows_per_label = max(1, maximum_rows // len(labels))
+    selected_indices: list[Any] = []
+
+    for label in labels:
+        label_rows = dataframe[
+            dataframe["health_label"].astype(str) == label
+        ]
+        diverse_rows = label_rows.drop_duplicates(recording_column)
+        label_indices = list(diverse_rows.head(rows_per_label).index)
+        if len(label_indices) < rows_per_label:
+            remaining = label_rows[~label_rows.index.isin(label_indices)]
+            label_indices.extend(
+                remaining.head(rows_per_label - len(label_indices)).index
+            )
+        selected_indices.extend(label_indices)
+
+    if len(selected_indices) < maximum_rows:
+        remaining = dataframe[~dataframe.index.isin(selected_indices)]
+        selected_indices.extend(
+            remaining.head(maximum_rows - len(selected_indices)).index
+        )
+
+    return dataframe.loc[selected_indices[:maximum_rows]].copy()
 
 
 def load_protocol_tensor_cache(

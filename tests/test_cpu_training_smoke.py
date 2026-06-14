@@ -13,6 +13,7 @@ pytest.importorskip("sklearn")
 
 from src.training.train_multimodal import (
     load_protocol_tensor_cache,
+    select_index_splits,
     select_curriculum_stage_two_rows,
     train_multimodal,
 )
@@ -115,6 +116,34 @@ def test_stage_two_contains_only_healthy_and_early_faults(
         & (stage_two["severity"].astype(str) == "2")
     ).any()
     assert (stage_two["severity"].astype(str) == "1").any()
+
+
+def test_smoke_split_selection_spans_classes_and_recordings() -> None:
+    rows = []
+    for split in ("train", "val", "test"):
+        for label in ("healthy", "fault"):
+            for recording_index in range(40):
+                for window_index in range(3):
+                    rows.append(
+                        {
+                            "split": split,
+                            "health_label": label,
+                            "base_recording_id": (
+                                f"{split}_{label}_{recording_index:02d}"
+                            ),
+                            "tensor_id": (
+                                f"{split}_{label}_{recording_index:02d}_"
+                                f"{window_index}.pt"
+                            ),
+                        }
+                    )
+
+    selected = select_index_splits(pd.DataFrame(rows), smoke_test=True)
+
+    for split_frame in selected:
+        assert len(split_frame) == 64
+        assert set(split_frame["health_label"]) == {"healthy", "fault"}
+        assert split_frame["base_recording_id"].nunique() == 64
 
 
 def test_shared_protocol_cache_prevents_per_run_disk_loads(
