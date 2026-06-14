@@ -261,7 +261,7 @@ Publication work still required after GPU training, beyond the original
 
 ## Go/No-Go Checklist
 
-- [ ] The v3 L4-readiness code is committed and synchronized.
+- [x] The v3 L4-readiness code is committed and synchronized.
 - [x] Local and CPU-server test suites pass.
 - [x] NLN physical sensor channels are documented and frozen.
 - [x] Raw files and checksums are validated.
@@ -284,5 +284,5 @@ Publication work still required after GPU training, beyond the original
 
 ## Immediate Next Action
 
-Push the v3 L4-readiness revision to GitHub, snapshot/move the existing data
-disk to a `g2-standard-16` VM, and run the L4 preflight.
+Snapshot/move the existing data disk to a `g2-standard-16` VM, then run the
+L4 preflight and GPU smoke test before starting the validation pilot.
