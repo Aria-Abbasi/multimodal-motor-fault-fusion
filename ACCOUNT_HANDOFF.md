@@ -25,8 +25,9 @@ fold-and-seed results.
 - The authoritative revision is the latest `master`; do not reset to the
   earlier `088c8f6` readiness commit.
 - Branch: `master`
-- The local repository and L4 contain the post-deployment BF16 stability fixes.
-  Confirm GitHub matches local `HEAD` before launching the validation pilot.
+- Active pilot revision: `d6a5849`.
+- The local repository and L4 contain the post-deployment BF16 stability fixes
+  and compact pilot dashboard.
 - GPU pipeline version: `corrected_multimodal_v3`
 - Preprocessing/smoke provenance version: `corrected_multimodal_v2`
 - `m5.md` is an intentionally untracked historical plan. Preserve it.
@@ -42,6 +43,12 @@ fold-and-seed results.
 - The final L4 preflight reports `ready: true`.
 - A clean BF16 GPU smoke run completed gate-off and gate-on training with
   finite gradient norms and CUDA-banked results.
+- The 48-job validation pilot is running in tmux session `nln_pilot`.
+- Pilot log: `artifacts/logs/nln_validation_pilot.log`.
+- Pilot results: `results/tables/nln_validation_pilot.csv`.
+- Pilot checkpoints: `artifacts/checkpoints/nln_validation_pilot`.
+- Measured pilot estimate: about 44-56 hours total. Tighten this estimate after
+  the first full job is banked.
 
 - All leakage-safe recording-level splits are complete:
   - four NLN leave-one-speed-out folds;
@@ -141,16 +148,134 @@ SHA-256:
 
 `aea7de39edef3bf27a9c4bbc1bf64eb9bde3992c9ff1221f3f9b486be24a4933`
 
-## Immediate Next Action
+## Current Live Action
 
-1. Push the latest local `master` so GitHub matches the L4 code revision.
-2. Run the 48-job NLN validation pilot from `docs/cloud_runbook.md`.
-3. Run `src.training.pilot_selection` with the frozen 0.95 recall constraint.
-4. Commit and push the selected `configs/frozen_l4_selection.yaml`.
-5. Generate and inspect the 525-row final plan.
+Leave the `nln_pilot` tmux session running. Check it with:
 
-Do not start the final 525-row experiment plan before committing the
-validation-selected `configs/frozen_l4_selection.yaml`.
+```bash
+cd /home/Aria/data/multimodal-motor-fault-fusion
+source /home/Aria/gpu-venv/bin/activate
+python scripts/pilot_status.py
+```
+
+Do not modify training code, change branches, stop the VM, or launch another
+training process while the pilot is active.
+
+## After The Pilot Finishes
+
+Run these steps on `motor-fault-l4` in this exact order.
+
+### 1. Confirm Completion
+
+```bash
+cd /home/Aria/data/multimodal-motor-fault-fusion
+source /home/Aria/gpu-venv/bin/activate
+python scripts/pilot_status.py
+```
+
+Require:
+
+- `48/48 completed`;
+- `0 failed`;
+- tmux session stopped because the command exited normally;
+- `results/tables/nln_validation_pilot_summary.csv` exists.
+
+### 2. Audit The Pilot Before Selection
+
+```bash
+python - <<'PY'
+import pandas as pd
+
+path = "results/tables/nln_validation_pilot.csv"
+df = pd.read_csv(path)
+print("rows:", len(df))
+print("status:", df["status"].value_counts(dropna=False).to_dict())
+print("folds:", sorted(df["fold_id"].unique()))
+print("experiments:", df["experiment"].nunique())
+print("seeds:", sorted(df["seed"].unique()))
+print("revisions:", df["code_revision"].unique().tolist())
+print("pipeline_versions:", df["pipeline_version"].unique().tolist())
+print("devices:", df["device"].unique().tolist())
+print("amp_dtypes:", df["amp_dtype"].unique().tolist())
+PY
+```
+
+Expected:
+
+- 48 rows, all `COMPLETED`;
+- 4 folds and 12 configurations;
+- only seed 42;
+- one code revision, beginning with `d6a5849`;
+- only `corrected_multimodal_v3`;
+- only `cuda` and `bfloat16`.
+
+Stop and investigate if any expectation fails.
+
+### 3. Freeze The Configuration
+
+Do not manually rank configurations and do not inspect test metrics for this
+decision. Run the validation-only selector:
+
+```bash
+python -m src.training.pilot_selection \
+  --results results/tables/nln_validation_pilot.csv \
+  --output configs/frozen_l4_selection.yaml \
+  --summary results/tables/nln_validation_pilot_selection.csv \
+  --expected-seed 42 \
+  --expected-folds 4 \
+  --minimum-early-recall 0.95
+```
+
+If no configuration reaches 0.95 mean validation recording early-fault
+recall, stop. Do not lower the threshold after viewing test results.
+
+### 4. Review And Preserve Selection Artifacts
+
+Review only the selector output and validation summary:
+
+```bash
+cat configs/frozen_l4_selection.yaml
+column -s, -t < results/tables/nln_validation_pilot_selection.csv | less -S
+```
+
+Commit:
+
+```bash
+git add \
+  configs/frozen_l4_selection.yaml \
+  results/tables/nln_validation_pilot.csv \
+  results/tables/nln_validation_pilot_summary.csv \
+  results/tables/nln_validation_pilot_selection.csv
+git commit -m "exp: freeze validation-selected loss and gate"
+git push origin master
+```
+
+Do not delete the pilot checkpoints until final training is complete and all
+artifacts are archived.
+
+### 5. Generate The Final Plan
+
+```bash
+python -m src.training.paper_experiment_runner \
+  --experiments E1 E2 E3 E4 E5 E6 \
+  --frozen-config configs/frozen_l4_selection.yaml \
+  --require-cuda \
+  --cache-max-gb 48 \
+  --dry-run \
+  --plan-file results/tables/final_experiment_plan.csv
+```
+
+Require exactly:
+
+- 525 result rows;
+- 425 unique training signatures;
+- 480 NLN rows;
+- 20 Paderborn condition rows;
+- 20 CWRU rows;
+- 5 Paderborn artificial-to-natural rows.
+
+Do not start final E1-E6 training until the frozen YAML is committed, pushed,
+and the dry-run plan passes this audit.
 
 ## Remaining Publication Work
 
