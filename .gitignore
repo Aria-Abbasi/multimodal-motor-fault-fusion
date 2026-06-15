@@ -18,6 +18,7 @@ artifacts/logs/
 artifacts/provenance/
 results/runs/
 results/tables/real_data_cpu_smoke*.csv
+results/tables/l4_gpu_smoke*.csv
 *.pth
 
 # Ignore raw, interim, and generated processed data
