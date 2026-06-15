@@ -419,7 +419,7 @@ def evaluate_model(
             recording_ids.extend(map(str, batch_recording_ids))
             if model.last_current_gate is not None:
                 gate_values.extend(
-                    model.last_current_gate.flatten().cpu().numpy().tolist()
+                    model.last_current_gate.float().flatten().cpu().numpy().tolist()
                 )
 
     predictions = [
