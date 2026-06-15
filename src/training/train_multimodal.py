@@ -394,6 +394,7 @@ def evaluate_model(
     device: torch.device,
     amp_enabled: bool,
     decision_threshold: float = 0.5,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> dict[str, Any]:
     """Evaluate window- and recording-level metrics at a fixed threshold."""
     model.eval()
@@ -407,7 +408,7 @@ def evaluate_model(
         for batch_x, batch_health, _, batch_early, batch_recording_ids in data_loader:
             batch_x = batch_x.to(device, non_blocking=True)
             with torch.autocast(
-                device_type=device.type, dtype=torch.float16, enabled=amp_enabled
+                device_type=device.type, dtype=amp_dtype, enabled=amp_enabled
             ):
                 health_logits, _ = model(batch_x)
             fault_probability = torch.softmax(health_logits.float(), dim=1)[:, 1]
@@ -478,6 +479,7 @@ def train_one_epoch(
     scaler: Any,
     device: torch.device,
     amp_enabled: bool,
+    amp_dtype: torch.dtype,
 ) -> tuple[float, float]:
     """Train one epoch and return mean loss and maximum observed gradient norm."""
     model.train()
@@ -509,7 +511,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with torch.autocast(
-            device_type=device.type, dtype=torch.float16, enabled=amp_enabled
+            device_type=device.type, dtype=amp_dtype, enabled=amp_enabled
         ):
             health_logits, family_logits = model(batch_x)
             if stage_health_loss is None:
@@ -561,6 +563,11 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("CUDA is required for this run but is not available")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled = bool(getattr(args, "amp", True) and device.type == "cuda")
+    amp_dtype = (
+        torch.bfloat16
+        if amp_enabled and torch.cuda.is_bf16_supported()
+        else torch.float16
+    )
 
     processed_dir = Path(args.processed_dir)
     index_path = processed_dir / "windows_index.csv"
@@ -733,15 +740,20 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         minimum_learning_rate_ratio=minimum_learning_rate / learning_rate,
     )
     if hasattr(torch.amp, "GradScaler"):
-        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+        scaler = torch.amp.GradScaler(
+            "cuda", enabled=amp_enabled and amp_dtype == torch.float16
+        )
     else:
-        scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+        scaler = torch.cuda.amp.GradScaler(
+            enabled=amp_enabled and amp_dtype == torch.float16
+        )
     family_loss = nn.CrossEntropyLoss()
     configured_health_loss = build_health_loss(args.loss_name)
 
     print(
         f"Training on {device} | seed={seed} | loss={args.loss_name} | "
-        f"gate={use_gate} | AdamW decay={getattr(args, 'weight_decay', 1e-4)}"
+        f"gate={use_gate} | amp={str(amp_dtype).removeprefix('torch.')} | "
+        f"AdamW decay={getattr(args, 'weight_decay', 1e-4)}"
     )
 
     best_state = copy.deepcopy(model.state_dict())
@@ -768,12 +780,17 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             scaler=scaler,
             device=device,
             amp_enabled=amp_enabled,
+            amp_dtype=amp_dtype,
         )
 
         validation_f1 = float("nan")
         if validation_loader is not None:
             validation_metrics = evaluate_model(
-                model, validation_loader, device, amp_enabled
+                model,
+                validation_loader,
+                device,
+                amp_enabled,
+                amp_dtype=amp_dtype,
             )
             validation_f1 = validation_metrics["recording_macro_f1"]
             if validation_f1 > best_validation_f1:
@@ -804,7 +821,12 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
     calibrated_validation_metrics: dict[str, Any] = {}
     if validation_loader is not None:
         calibration = evaluate_model(
-            model, validation_loader, device, amp_enabled, decision_threshold=0.5
+            model,
+            validation_loader,
+            device,
+            amp_enabled,
+            decision_threshold=0.5,
+            amp_dtype=amp_dtype,
         )
         decision_threshold = select_decision_threshold(
             calibration["_recording_targets"],
@@ -816,6 +838,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             device,
             amp_enabled,
             decision_threshold=decision_threshold,
+            amp_dtype=amp_dtype,
         )
         for private_key in (
             "_targets",
@@ -830,6 +853,7 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         device,
         amp_enabled,
         decision_threshold=decision_threshold,
+        amp_dtype=amp_dtype,
     )
     for private_key in (
         "_targets",
@@ -869,6 +893,9 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "torch_version": torch.__version__,
         "torch_cuda_version": torch.version.cuda or "N/A",
+        "amp_dtype": (
+            str(amp_dtype).removeprefix("torch.") if amp_enabled else "disabled"
+        ),
         "ablation": ablation,
         "curriculum_requested": bool(getattr(args, "use_curriculum", True)),
         "curriculum": stage2_epochs > 0,
