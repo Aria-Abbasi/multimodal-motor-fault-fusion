@@ -72,7 +72,7 @@ The current image family verified on June 14, 2026 is:
 pytorch-2-9-cu129-ubuntu-2404-nvidia-580
 ```
 
-Create the VM with a 75 GB boot disk and attach the existing data disk:
+Create the VM with a 120 GB boot disk and attach the existing data disk:
 
 ```bash
 gcloud compute instances create motor-fault-l4 \
@@ -82,7 +82,7 @@ gcloud compute instances create motor-fault-l4 \
   --maintenance-policy TERMINATE \
   --image-family pytorch-2-9-cu129-ubuntu-2404-nvidia-580 \
   --image-project deeplearning-platform-release \
-  --boot-disk-size 75GB \
+  --boot-disk-size 120GB \
   --boot-disk-type pd-balanced \
   --disk name=data-nether-20260525-204259,device-name=motor-fault-data,mode=rw,boot=no,auto-delete=no
 ```
@@ -118,11 +118,15 @@ sudo chown -R "$(id -u):$(id -g)" /home/Aria/data
 ```
 
 Do not activate or copy the existing `.venv`; it contains CPU-only PyTorch.
-Use the CUDA-enabled Python environment supplied by the Deep Learning VM.
-Install the project without resolving its `torch` dependency, then install the
-remaining packages explicitly:
+Create a boot-disk virtual environment that inherits the CUDA-enabled PyTorch
+supplied by the Deep Learning VM, then install the remaining dependencies:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y python3.12-venv
+python3 -m venv --system-site-packages /home/Aria/gpu-venv
+source /home/Aria/gpu-venv/bin/activate
+
 cd /home/Aria/data/multimodal-motor-fault-fusion
 python -m pip install -e . --no-deps
 python -m pip install \
@@ -256,6 +260,7 @@ Launch in a detached session:
 ```bash
 tmux new-session -d -s final_e1_e6 \
   "cd /home/Aria/data/multimodal-motor-fault-fusion && \
+   source /home/Aria/gpu-venv/bin/activate && \
    python -m src.training.paper_experiment_runner \
      --experiments E1 E2 E3 E4 E5 E6 \
      --frozen-config configs/frozen_l4_selection.yaml \
