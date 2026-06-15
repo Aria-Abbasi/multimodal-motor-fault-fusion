@@ -173,9 +173,11 @@ folds it records **2,003,187 tensors**, with no count mismatches.
 Verified infrastructure:
 
 - one standard NVIDIA L4 quota in `europe-west4`;
-- L4 and `g2-standard-16` availability in `europe-west4-c`;
+- `motor-fault-l4` running as `g2-standard-16` in `europe-west4-c`;
 - existing 350 GB persistent data disk in `europe-west4-c`;
 - 126.4 GiB processed tree and about 81 GB currently free.
+- final L4 preflight passed with all 2,003,187 tensors counted;
+- both BF16 gate-off/on CUDA smoke jobs completed with finite gradients.
 
 Execution:
 
@@ -275,6 +277,7 @@ Publication work still required after GPU training, beyond the original
 - [x] Preprocessing provenance is frozen and archived.
 - [x] L4 quota, zone availability, disk, and experiment counts are verified.
 - [x] Validation-only pilot freezing and CUDA preflight safeguards are implemented.
+- [x] The L4 preflight and BF16 GPU smoke test pass.
 - [ ] The loss and gate are frozen from validation data only.
 - [ ] E1-E6 contain every planned fold and seed.
 - [ ] E7 uses validation-selected checkpoints.
@@ -284,5 +287,5 @@ Publication work still required after GPU training, beyond the original
 
 ## Immediate Next Action
 
-Snapshot/move the existing data disk to a `g2-standard-16` VM, then run the
-L4 preflight and GPU smoke test before starting the validation pilot.
+Push the post-deployment BF16 stability commits, then run the 48-job NLN
+validation pilot and freeze the loss/gate choice from validation metrics only.

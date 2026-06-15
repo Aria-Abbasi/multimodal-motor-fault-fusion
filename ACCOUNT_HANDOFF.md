@@ -22,9 +22,11 @@ fold-and-seed results.
 ## Repository State
 
 - Repository: `Aria-Abbasi/multimodal-motor-fault-fusion`
-- Ready revision: `088c8f6`
+- The authoritative revision is the latest `master`; do not reset to the
+  earlier `088c8f6` readiness commit.
 - Branch: `master`
-- Local, CPU server, and GitHub were synchronized at that revision.
+- The local repository and L4 contain the post-deployment BF16 stability fixes.
+  Confirm GitHub matches local `HEAD` before launching the validation pilot.
 - GPU pipeline version: `corrected_multimodal_v3`
 - Preprocessing/smoke provenance version: `corrected_multimodal_v2`
 - `m5.md` is an intentionally untracked historical plan. Preserve it.
@@ -32,6 +34,14 @@ fold-and-seed results.
 - `docs/cloud_runbook.md` contains the exact L4 migration and training commands.
 
 ## Verified Completed Work
+
+- The `motor-fault-l4` VM is running in `europe-west4-c`.
+- The original 350 GB data disk is mounted at `/home/Aria/data`.
+- The safety snapshot `motor-fault-data-pre-l4-20260615` is `READY`.
+- CUDA reports an NVIDIA L4 with 23,034 MiB VRAM.
+- The final L4 preflight reports `ready: true`.
+- A clean BF16 GPU smoke run completed gate-off and gate-on training with
+  finite gradient norms and CUDA-banked results.
 
 - All leakage-safe recording-level splits are complete:
   - four NLN leave-one-speed-out folds;
@@ -133,18 +143,11 @@ SHA-256:
 
 ## Immediate Next Action
 
-Follow `docs/cloud_runbook.md` in order:
-
-1. Confirm local, CPU server, and GitHub still point to revision `088c8f6`.
-2. Snapshot `data-nether-20260525-204259`.
-3. Stop the CPU VM and detach only its non-boot data disk.
-4. Create `motor-fault-l4` as `g2-standard-16` in `europe-west4-c`.
-5. Attach and mount the existing data disk at `/home/Aria/data`.
-6. Do not reuse the CPU `.venv`; it contains CPU-only PyTorch.
-7. Verify CUDA and run all 52 tests.
-8. Run `python scripts/l4_preflight.py --full-tensor-count`.
-9. Run the single GPU smoke command from the runbook.
-10. Start the 48-job validation pilot only if preflight and smoke both pass.
+1. Push the latest local `master` so GitHub matches the L4 code revision.
+2. Run the 48-job NLN validation pilot from `docs/cloud_runbook.md`.
+3. Run `src.training.pilot_selection` with the frozen 0.95 recall constraint.
+4. Commit and push the selected `configs/frozen_l4_selection.yaml`.
+5. Generate and inspect the 525-row final plan.
 
 Do not start the final 525-row experiment plan before committing the
 validation-selected `configs/frozen_l4_selection.yaml`.
