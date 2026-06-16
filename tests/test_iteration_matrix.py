@@ -54,6 +54,14 @@ def test_runner_accepts_sequential_protocols() -> None:
     assert args.cache_max_gb == 36.0
 
 
+def test_runner_accepts_stage2_checkpoint_selection() -> None:
+    args = build_parser().parse_args(
+        ["--checkpoint-selection", "best_stage2"]
+    )
+
+    assert args.checkpoint_selection == "best_stage2"
+
+
 def test_paderborn_rejects_early_weight_grid(tmp_path) -> None:
     args = argparse.Namespace(
         protocol="paderborn_artificial_to_natural",
@@ -171,6 +179,7 @@ def test_runner_executes_every_nln_fold(
         write_processed_fold(tmp_path / "processed", fold_id)
 
     def fake_train(args: argparse.Namespace) -> dict[str, object]:
+        assert args.checkpoint_selection == "best_stage2"
         return {
             "run_id": args.run_id,
             "experiment": args.experiment,
@@ -212,6 +221,8 @@ def test_runner_executes_every_nln_fold(
             str(output_path),
             "--checkpoint-dir",
             str(tmp_path / "checkpoints"),
+            "--checkpoint-selection",
+            "best_stage2",
         ]
     )
 

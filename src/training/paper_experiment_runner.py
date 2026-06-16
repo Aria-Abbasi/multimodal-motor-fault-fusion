@@ -378,6 +378,7 @@ def _proposed_args(
         modality_dropout=args.modality_dropout,
         warmup_ratio=args.warmup_ratio,
         family_loss_weight=args.family_loss_weight,
+        stage2_sampler_early_weight=args.stage2_sampler_early_weight,
         preload=False,
         shared_tensor_cache=shared_cache,
         amp=args.amp,
@@ -404,6 +405,7 @@ def training_signature(job: PaperJob, args: argparse.Namespace) -> str:
             job.use_curriculum,
             job.stage1_epochs,
             job.stage2_epochs,
+            getattr(args, "stage2_sampler_early_weight", 2.0),
         )
     else:
         details = (job.modality, args.baseline_epochs)
@@ -577,6 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--modality-dropout", type=float, default=0.2)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--family-loss-weight", type=float, default=0.5)
+    parser.add_argument("--stage2-sampler-early-weight", type=float, default=2.0)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument(

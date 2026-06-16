@@ -12,9 +12,11 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("sklearn")
 
 from src.training.train_multimodal import (
+    build_stage_two_sampler,
     load_protocol_tensor_cache,
     select_index_splits,
     select_curriculum_stage_two_rows,
+    summarize_dataframe_targets,
     train_multimodal,
 )
 
@@ -116,6 +118,26 @@ def test_stage_two_contains_only_healthy_and_early_faults(
         & (stage_two["severity"].astype(str) == "2")
     ).any()
     assert (stage_two["severity"].astype(str) == "1").any()
+
+
+def test_stage_two_sampler_uses_full_training_split_with_early_emphasis(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "synthetic"
+    build_synthetic_dataset(data_dir)
+    dataframe = pd.read_csv(data_dir / "windows_index.csv")
+    train, _, _ = select_index_splits(dataframe, smoke_test=False)
+
+    sampler = build_stage_two_sampler(
+        train, "nln_emp", early_weight=3.0, seed=42
+    )
+    sampled_indices = list(iter(sampler))
+    counts = summarize_dataframe_targets(train, "nln_emp")
+
+    assert len(sampled_indices) == len(train)
+    assert counts["healthy"] == 6
+    assert counts["early_fault"] == 6
+    assert counts["later_fault"] == 0
 
 
 def test_smoke_split_selection_spans_classes_and_recordings() -> None:

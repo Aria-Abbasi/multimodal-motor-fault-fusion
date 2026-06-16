@@ -22,6 +22,34 @@ def test_all_six_loss_configurations_are_finite() -> None:
         assert torch.isfinite(loss)
 
 
+def test_loss_grid_changes_values_and_gradients_on_mixed_batch() -> None:
+    targets = torch.tensor([0, 1, 1, 0])
+    early_mask = torch.tensor([False, True, False, False])
+    base_logits = torch.tensor(
+        [
+            [1.8, -0.4],
+            [0.7, 0.1],
+            [-0.2, 1.2],
+            [0.3, -0.1],
+        ],
+        dtype=torch.float32,
+    )
+
+    values = {}
+    gradients = {}
+    for name in ("ce_1.0", "ce_4.0", "dynamic_focal"):
+        logits = base_logits.clone().requires_grad_(True)
+        loss = build_health_loss(name)(logits, targets, early_mask)
+        loss.backward()
+        values[name] = float(loss.detach())
+        gradients[name] = logits.grad.detach().clone()
+
+    assert values["ce_4.0"] > values["ce_1.0"]
+    assert values["dynamic_focal"] != pytest.approx(values["ce_1.0"])
+    assert not torch.allclose(gradients["ce_1.0"], gradients["ce_4.0"])
+    assert not torch.allclose(gradients["ce_1.0"], gradients["dynamic_focal"])
+
+
 def test_modality_gate_is_optional_and_sample_wise() -> None:
     batch = torch.randn(2, 2, 32, 32)
     gated_model = MultimodalMotorModel(

@@ -19,7 +19,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -38,15 +38,23 @@ from src.training.data_selection import select_label_budget  # noqa: E402
 
 DEFAULT_MODALITY_DROPOUT = 0.2
 PIPELINE_VERSION = "corrected_multimodal_v3"
+CHECKPOINT_SELECTION_MODES = ("best_validation", "best_stage2")
 
 
 @lru_cache(maxsize=1)
 def current_git_revision() -> str:
     """Return the checked-out source revision for result provenance."""
     try:
-        return subprocess.check_output(
+        revision = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
         ).strip()
+        dirty = subprocess.run(
+            ["git", "diff", "--quiet"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode != 0
+        return f"{revision}-dirty" if dirty else revision
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
 
@@ -372,20 +380,112 @@ def make_loader(
     seed: int,
     num_workers: int,
     pin_memory: bool,
+    sampler: Optional[WeightedRandomSampler] = None,
 ) -> DataLoader:
     """Build a deterministic DataLoader."""
+    if sampler is not None and shuffle:
+        raise ValueError("shuffle must be False when a sampler is provided")
     generator = torch.Generator()
     generator.manual_seed(seed)
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         worker_init_fn=seed_worker if num_workers else None,
         generator=generator,
         persistent_workers=num_workers > 0,
     )
+
+
+def summarize_dataframe_targets(
+    dataframe: pd.DataFrame, dataset_name: str
+) -> dict[str, int]:
+    """Count health and early-fault labels for diagnostics and provenance."""
+    health_labels = dataframe["health_label"].astype(str).str.strip().str.lower()
+    fault_mask = health_labels.str.contains("fault", na=False)
+    healthy_mask = health_labels == "healthy"
+    if "severity" in dataframe.columns:
+        severities = dataframe["severity"].fillna("")
+    else:
+        severities = pd.Series([""] * len(dataframe), index=dataframe.index)
+    early_mask = pd.Series(
+        [
+            is_early_fault(severity, health, dataset_name)
+            for severity, health in zip(severities, dataframe["health_label"])
+        ],
+        index=dataframe.index,
+    )
+    return {
+        "total": int(len(dataframe)),
+        "healthy": int(healthy_mask.sum()),
+        "fault": int(fault_mask.sum()),
+        "early_fault": int(early_mask.sum()),
+        "later_fault": int((fault_mask & ~early_mask).sum()),
+    }
+
+
+def build_stage_two_sampler(
+    train_dataframe: pd.DataFrame,
+    dataset_name: str,
+    early_weight: float,
+    seed: int,
+) -> WeightedRandomSampler:
+    """Sample the full training split while emphasizing early faults."""
+    if early_weight <= 0:
+        raise ValueError("stage2 early sampler weight must be positive")
+    if "severity" in train_dataframe.columns:
+        severities = train_dataframe["severity"].fillna("")
+    else:
+        severities = pd.Series([""] * len(train_dataframe), index=train_dataframe.index)
+    early_mask = torch.tensor(
+        [
+            is_early_fault(severity, health, dataset_name)
+            for severity, health in zip(severities, train_dataframe["health_label"])
+        ],
+        dtype=torch.bool,
+    )
+    weights = torch.ones(len(train_dataframe), dtype=torch.double)
+    weights[early_mask] = float(early_weight)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return WeightedRandomSampler(
+        weights,
+        num_samples=len(train_dataframe),
+        replacement=True,
+        generator=generator,
+    )
+
+
+def prediction_count_summary(
+    metrics: dict[str, Any], decision_threshold: float
+) -> dict[str, int]:
+    """Count calibrated window and recording predictions."""
+    probabilities = metrics.get("_probabilities", [])
+    targets = metrics.get("_targets", [])
+    recording_probabilities = metrics.get("_recording_probabilities", [])
+    recording_targets = metrics.get("_recording_targets", [])
+    predictions = [int(probability >= decision_threshold) for probability in probabilities]
+    recording_predictions = [
+        int(probability >= decision_threshold)
+        for probability in recording_probabilities
+    ]
+    return {
+        "predicted_fault_windows": int(sum(predictions)),
+        "predicted_healthy_windows": int(len(predictions) - sum(predictions)),
+        "true_fault_windows": int(sum(targets)),
+        "true_healthy_windows": int(len(targets) - sum(targets)),
+        "recording_predicted_faults": int(sum(recording_predictions)),
+        "recording_predicted_healthy": int(
+            len(recording_predictions) - sum(recording_predictions)
+        ),
+        "recording_true_faults": int(sum(recording_targets)),
+        "recording_true_healthy": int(
+            len(recording_targets) - sum(recording_targets)
+        ),
+    }
 
 
 def evaluate_model(
@@ -612,24 +712,37 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         shared_tensor_cache=shared_tensors,
         dataset_name=dataset_name,
     )
-    stage_two_dataframe = select_curriculum_stage_two_rows(
+    stage_two_focus_dataframe = select_curriculum_stage_two_rows(
         train_dataframe, dataset_name
     )
     stage_two_has_early_faults = bool(
-        len(stage_two_dataframe)
+        len(stage_two_focus_dataframe)
         and any(
             is_early_fault(severity, health, dataset_name)
             for severity, health in zip(
-                stage_two_dataframe.get(
+                stage_two_focus_dataframe.get(
                     "severity", pd.Series(dtype=str)
                 ).fillna(""),
-                stage_two_dataframe["health_label"],
+                stage_two_focus_dataframe["health_label"],
             )
         )
     )
+    stage_two_sampler_weight = float(
+        getattr(args, "stage2_sampler_early_weight", 2.0)
+    )
+    stage_two_sampler = (
+        build_stage_two_sampler(
+            train_dataframe,
+            dataset_name,
+            early_weight=stage_two_sampler_weight,
+            seed=seed + 1,
+        )
+        if stage_two_has_early_faults
+        else None
+    )
     stage_two_dataset = (
         MultimodalDataset(
-            stage_two_dataframe,
+            train_dataframe,
             tensor_dir,
             family_to_index,
             preload=False,
@@ -667,10 +780,11 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         make_loader(
             stage_two_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             seed=seed + 1,
             num_workers=num_workers,
             pin_memory=device.type == "cuda",
+            sampler=stage_two_sampler,
         )
         if stage_two_dataset is not None
         else None
@@ -749,21 +863,55 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         )
     family_loss = nn.CrossEntropyLoss()
     configured_health_loss = build_health_loss(args.loss_name)
+    checkpoint_selection = str(
+        getattr(args, "checkpoint_selection", "best_validation")
+    )
+    if checkpoint_selection not in CHECKPOINT_SELECTION_MODES:
+        raise ValueError(
+            "checkpoint_selection must be one of "
+            f"{CHECKPOINT_SELECTION_MODES}, got {checkpoint_selection!r}"
+        )
+    if checkpoint_selection == "best_stage2" and stage2_epochs <= 0:
+        raise ValueError(
+            "checkpoint_selection='best_stage2' requires an active Stage 2"
+        )
 
     print(
         f"Training on {device} | seed={seed} | loss={args.loss_name} | "
         f"gate={use_gate} | amp={str(amp_dtype).removeprefix('torch.')} | "
         f"AdamW decay={getattr(args, 'weight_decay', 1e-4)}"
     )
+    train_counts = summarize_dataframe_targets(train_dataframe, dataset_name)
+    stage_two_focus_counts = summarize_dataframe_targets(
+        stage_two_focus_dataframe, dataset_name
+    )
+    print(
+        "Train counts | "
+        f"total={train_counts['total']} healthy={train_counts['healthy']} "
+        f"fault={train_counts['fault']} early={train_counts['early_fault']} "
+        f"later={train_counts['later_fault']}"
+    )
+    if stage2_epochs:
+        print(
+            "Stage 2 sampler | full_train_mixed=True "
+            f"sampled={len(train_dataframe)} "
+            f"early_weight={stage_two_sampler_weight:.3f} "
+            f"focus_total={stage_two_focus_counts['total']} "
+            f"focus_healthy={stage_two_focus_counts['healthy']} "
+            f"focus_early={stage_two_focus_counts['early_fault']}"
+        )
 
     best_state = copy.deepcopy(model.state_dict())
     best_validation_f1 = -math.inf
+    selected_epoch = 0
+    selected_stage = "initial"
+    selected_validation_f1 = float("nan")
     history: list[dict[str, Any]] = []
     total_epochs = stage1_epochs + stage2_epochs
     for epoch in range(total_epochs):
         in_stage_two = epoch >= stage1_epochs
         stage_name = "stage2_early_focus" if in_stage_two else "stage1_general"
-        active_health_loss = configured_health_loss if in_stage_two else None
+        active_health_loss = configured_health_loss
         active_loader = stage_two_loader if in_stage_two else train_loader
         if active_loader is None:
             raise RuntimeError("Stage 2 was scheduled without a valid data loader")
@@ -784,6 +932,9 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         )
 
         validation_f1 = float("nan")
+        eligible_for_checkpoint = (
+            checkpoint_selection == "best_validation" or in_stage_two
+        )
         if validation_loader is not None:
             validation_metrics = evaluate_model(
                 model,
@@ -793,11 +944,17 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
                 amp_dtype=amp_dtype,
             )
             validation_f1 = validation_metrics["recording_macro_f1"]
-            if validation_f1 > best_validation_f1:
+            if eligible_for_checkpoint and validation_f1 > best_validation_f1:
                 best_validation_f1 = validation_f1
                 best_state = copy.deepcopy(model.state_dict())
+                selected_epoch = epoch + 1
+                selected_stage = stage_name
+                selected_validation_f1 = validation_f1
         else:
-            best_state = copy.deepcopy(model.state_dict())
+            if eligible_for_checkpoint:
+                best_state = copy.deepcopy(model.state_dict())
+                selected_epoch = epoch + 1
+                selected_stage = stage_name
 
         current_lr = optimizer.param_groups[0]["lr"]
         history.append(
@@ -815,6 +972,9 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             f"loss={epoch_loss:.4f} | val_f1={format_optional_metric(validation_f1)} "
             f"| lr={current_lr:.7f} | grad_norm={maximum_gradient_norm:.3f}"
         )
+
+    if checkpoint_selection == "best_stage2" and selected_epoch <= stage1_epochs:
+        raise RuntimeError("No Stage 2 checkpoint was selected")
 
     model.load_state_dict(best_state)
     decision_threshold = 0.5
@@ -840,6 +1000,9 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             decision_threshold=decision_threshold,
             amp_dtype=amp_dtype,
         )
+        validation_prediction_counts = prediction_count_summary(
+            calibrated_validation_metrics, decision_threshold
+        )
         for private_key in (
             "_targets",
             "_probabilities",
@@ -847,6 +1010,8 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             "_recording_probabilities",
         ):
             calibrated_validation_metrics.pop(private_key, None)
+    else:
+        validation_prediction_counts = {}
     test_metrics = evaluate_model(
         model,
         test_loader,
@@ -855,6 +1020,9 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         decision_threshold=decision_threshold,
         amp_dtype=amp_dtype,
     )
+    test_prediction_counts = prediction_count_summary(
+        test_metrics, decision_threshold
+    )
     for private_key in (
         "_targets",
         "_probabilities",
@@ -862,6 +1030,23 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         "_recording_probabilities",
     ):
         test_metrics.pop(private_key, None)
+    print(
+        f"Validation threshold={decision_threshold:.4f} | "
+        "recording_preds="
+        f"{validation_prediction_counts.get('recording_predicted_faults', 0)}F/"
+        f"{validation_prediction_counts.get('recording_predicted_healthy', 0)}H "
+        "recording_true="
+        f"{validation_prediction_counts.get('recording_true_faults', 0)}F/"
+        f"{validation_prediction_counts.get('recording_true_healthy', 0)}H"
+    )
+    print(
+        "Test recording preds | "
+        f"{test_prediction_counts['recording_predicted_faults']}F/"
+        f"{test_prediction_counts['recording_predicted_healthy']}H "
+        "true="
+        f"{test_prediction_counts['recording_true_faults']}F/"
+        f"{test_prediction_counts['recording_true_healthy']}H"
+    )
     ablation = getattr(args, "ablation", None) or "fusion"
     run_id = str(
         getattr(
@@ -903,7 +1088,29 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
         "modality_gate": use_gate,
         "stage1_epochs": stage1_epochs,
         "stage2_epochs": stage2_epochs,
-        "stage2_samples": len(stage_two_dataframe) if stage2_epochs else 0,
+        "checkpoint_selection": checkpoint_selection,
+        "selected_epoch": selected_epoch,
+        "selected_stage": selected_stage,
+        "selected_validation_macro_f1": selected_validation_f1,
+        "stage2_samples": len(train_dataframe) if stage2_epochs else 0,
+        "stage2_focus_samples": (
+            len(stage_two_focus_dataframe) if stage2_epochs else 0
+        ),
+        "stage2_sampler_early_weight": (
+            stage_two_sampler_weight if stage2_epochs else 0.0
+        ),
+        "stage2_train_healthy_samples": (
+            train_counts["healthy"] if stage2_epochs else 0
+        ),
+        "stage2_train_fault_samples": (
+            train_counts["fault"] if stage2_epochs else 0
+        ),
+        "stage2_train_early_fault_samples": (
+            train_counts["early_fault"] if stage2_epochs else 0
+        ),
+        "stage2_train_later_fault_samples": (
+            train_counts["later_fault"] if stage2_epochs else 0
+        ),
         "n_train_windows": len(train_dataframe),
         "learning_rate": learning_rate,
         "weight_decay": float(getattr(args, "weight_decay", 1e-4)),
@@ -920,6 +1127,11 @@ def train_multimodal(args: argparse.Namespace) -> dict[str, Any]:
             f"validation_{name}": value
             for name, value in calibrated_validation_metrics.items()
         },
+        **{
+            f"validation_{name}": value
+            for name, value in validation_prediction_counts.items()
+        },
+        **test_prediction_counts,
         **test_metrics,
     }
 
@@ -998,6 +1210,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--family-loss-weight", type=float, default=0.5)
+    parser.add_argument("--stage2-sampler-early-weight", type=float, default=2.0)
+    parser.add_argument(
+        "--checkpoint-selection",
+        choices=CHECKPOINT_SELECTION_MODES,
+        default="best_validation",
+        help=(
+            "Checkpoint policy: best_validation may select any epoch; "
+            "best_stage2 only selects Stage 2 epochs."
+        ),
+    )
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--require-cuda", action="store_true")

@@ -427,6 +427,8 @@ def run_protocol_matrix(args: argparse.Namespace, protocol: str) -> None:
                         modality_dropout=getattr(args, "modality_dropout", 0.2),
                         warmup_ratio=args.warmup_ratio,
                         family_loss_weight=args.family_loss_weight,
+                        stage2_sampler_early_weight=args.stage2_sampler_early_weight,
+                        checkpoint_selection=args.checkpoint_selection,
                         preload=False,
                         shared_tensor_cache=shared_cache,
                         amp=args.amp,
@@ -527,6 +529,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--modality-dropout", type=float, default=0.2)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--family-loss-weight", type=float, default=0.5)
+    parser.add_argument("--stage2-sampler-early-weight", type=float, default=2.0)
+    parser.add_argument(
+        "--checkpoint-selection",
+        choices=("best_validation", "best_stage2"),
+        default="best_validation",
+        help=(
+            "Checkpoint policy passed to multimodal training. Use best_stage2 "
+            "for the corrected loss/gate pilot."
+        ),
+    )
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--cache-max-gb",

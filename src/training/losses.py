@@ -53,7 +53,7 @@ class SeverityWeightedCrossEntropy(nn.Module):
             torch.full_like(weights, self.early_weight),
             weights,
         )
-        return (sample_loss * weights).sum() / weights.sum().clamp_min(1.0)
+        return (sample_loss * weights).mean()
 
 
 class DynamicFocalLoss(nn.Module):
