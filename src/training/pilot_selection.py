@@ -14,11 +14,13 @@ import pandas as pd
 import yaml
 
 from src.training.experiment_runner import build_experiment_matrix
+from src.training.losses import LOSS_NAMES
 from src.training.train_multimodal import PIPELINE_VERSION
 
 
 REQUIRED_VALIDATION_METRICS = (
     "validation_recording_macro_f1",
+    "validation_recording_balanced_acc",
     "validation_recording_early_fault_recall",
     "validation_recording_fault_precision",
     "validation_recording_mcc",
@@ -58,6 +60,7 @@ def summarize_pilot(
     *,
     expected_seed: int,
     expected_folds: int = 4,
+    expected_losses: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     """Validate and summarize the complete 12-configuration NLN pilot."""
     required = {
@@ -92,9 +95,12 @@ def summarize_pilot(
         failed = pilot.loc[pilot["status"] != "COMPLETED", "experiment"].tolist()
         raise ValueError(f"Pilot contains incomplete rows: {failed}")
 
-    expected_experiments = {
-        row["experiment"] for row in build_experiment_matrix()
-    }
+    expected_matrix = (
+        build_experiment_matrix()
+        if expected_losses is None
+        else build_experiment_matrix(expected_losses)
+    )
+    expected_experiments = {row["experiment"] for row in expected_matrix}
     observed_experiments = set(pilot["experiment"].astype(str))
     if observed_experiments != expected_experiments:
         raise ValueError(
@@ -136,6 +142,7 @@ def select_configuration(
     summary: pd.DataFrame,
     *,
     minimum_early_recall: float,
+    selection_profile: str = "macro_f1",
 ) -> pd.Series:
     """Apply the predeclared validation-only selection rule."""
     if not 0 <= minimum_early_recall <= 1:
@@ -147,17 +154,28 @@ def select_configuration(
             "No pilot configuration meets the frozen minimum validation "
             f"early-fault recall of {minimum_early_recall:.4f}"
         )
-    ranked = eligible.sort_values(
-        [
+    if selection_profile == "macro_f1":
+        sort_columns = [
             "validation_recording_macro_f1_mean",
             "validation_recording_fault_precision_mean",
             "validation_recording_mcc_mean",
             "validation_recording_macro_f1_between_fold_std",
             "experiment",
-        ],
-        ascending=[False, False, False, True, True],
-        kind="mergesort",
-    )
+        ]
+        ascending = [False, False, False, True, True]
+    elif selection_profile == "balanced_mcc":
+        sort_columns = [
+            "validation_recording_mcc_mean",
+            "validation_recording_balanced_acc_mean",
+            "validation_recording_macro_f1_mean",
+            "validation_recording_fault_precision_mean",
+            "validation_recording_macro_f1_between_fold_std",
+            "experiment",
+        ]
+        ascending = [False, False, False, False, True, True]
+    else:
+        raise ValueError(f"Unknown selection profile: {selection_profile}")
+    ranked = eligible.sort_values(sort_columns, ascending=ascending, kind="mergesort")
     return ranked.iloc[0]
 
 
@@ -169,6 +187,8 @@ def freeze_pilot_configuration(
     expected_seed: int = 42,
     expected_folds: int = 4,
     minimum_early_recall: float = 0.95,
+    expected_losses: tuple[str, ...] | None = None,
+    selection_profile: str = "macro_f1",
 ) -> dict[str, Any]:
     """Select and write a reproducible frozen configuration."""
     results_path = Path(results_path)
@@ -177,9 +197,12 @@ def freeze_pilot_configuration(
         results,
         expected_seed=expected_seed,
         expected_folds=expected_folds,
+        expected_losses=expected_losses,
     )
     selected = select_configuration(
-        summary, minimum_early_recall=minimum_early_recall
+        summary,
+        minimum_early_recall=minimum_early_recall,
+        selection_profile=selection_profile,
     )
 
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,13 +215,21 @@ def freeze_pilot_configuration(
         "source_results_sha256": _sha256(results_path),
         "expected_seed": expected_seed,
         "expected_folds": expected_folds,
+        "expected_losses": list(expected_losses) if expected_losses else None,
         "minimum_validation_recording_early_fault_recall": minimum_early_recall,
+        "selection_profile": selection_profile,
         "selection_rule": [
             "Require mean validation recording early-fault recall at or above "
             "the frozen minimum",
-            "Maximize mean validation recording Macro F1",
-            "Tie-break by fault precision, MCC, lower between-fold Macro F1 "
-            "standard deviation, then experiment name",
+            (
+                "Maximize mean validation recording Macro F1, then precision "
+                "and MCC"
+                if selection_profile == "macro_f1"
+                else "Maximize mean validation recording MCC, then balanced "
+                "accuracy, Macro F1 and precision"
+            ),
+            "Tie-break by lower between-fold Macro F1 standard deviation, "
+            "then experiment name",
             "Never use test metrics for configuration selection",
         ],
         "selected_experiment": str(selected["experiment"]),
@@ -235,6 +266,12 @@ def main() -> None:
     parser.add_argument(
         "--minimum-early-recall", type=float, default=0.95
     )
+    parser.add_argument("--losses", nargs="+", choices=LOSS_NAMES)
+    parser.add_argument(
+        "--selection-profile",
+        choices=("macro_f1", "balanced_mcc"),
+        default="macro_f1",
+    )
     args = parser.parse_args()
     payload = freeze_pilot_configuration(
         Path(args.results),
@@ -243,6 +280,8 @@ def main() -> None:
         expected_seed=args.expected_seed,
         expected_folds=args.expected_folds,
         minimum_early_recall=args.minimum_early_recall,
+        expected_losses=tuple(args.losses) if args.losses else None,
+        selection_profile=args.selection_profile,
     )
     print(json.dumps(payload, indent=2))
 

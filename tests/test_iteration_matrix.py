@@ -36,6 +36,20 @@ def test_matrix_contains_six_losses_with_and_without_gate() -> None:
     }
 
 
+def test_matrix_accepts_explicit_low_pressure_losses() -> None:
+    matrix = build_experiment_matrix(
+        ("ce_1.0", "ce_1.25", "ce_1.5", "dynamic_focal")
+    )
+
+    assert len(matrix) == 8
+    assert {row["loss_name"] for row in matrix} == {
+        "ce_1.0",
+        "ce_1.25",
+        "ce_1.5",
+        "dynamic_focal",
+    }
+
+
 def test_runner_accepts_sequential_protocols() -> None:
     args = build_parser().parse_args(
         [

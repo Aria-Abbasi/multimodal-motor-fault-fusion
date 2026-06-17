@@ -38,6 +38,9 @@ def build_pilot_results() -> pd.DataFrame:
                     "validation_recording_early_fault_recall": (
                         0.96 if experiment_index else 0.90
                     ),
+                    "validation_recording_balanced_acc": (
+                        0.55 + experiment_index / 100
+                    ),
                     "validation_recording_fault_precision": (
                         0.60 + experiment_index / 100
                     ),
@@ -66,6 +69,28 @@ def test_pilot_selection_rejects_missing_fold() -> None:
 
     with pytest.raises(ValueError, match="must contain 4 folds"):
         summarize_pilot(results, expected_seed=42, expected_folds=4)
+
+
+def test_pilot_selection_accepts_explicit_loss_subset() -> None:
+    losses = ("ce_1.0", "ce_1.25", "ce_1.5", "dynamic_focal")
+    expected = {row["experiment"] for row in build_experiment_matrix(losses)}
+    results = build_pilot_results()
+    subset = results[results["experiment"].isin(expected)]
+
+    summary = summarize_pilot(
+        subset,
+        expected_seed=42,
+        expected_folds=4,
+        expected_losses=losses,
+    )
+    selected = select_configuration(
+        summary,
+        minimum_early_recall=0.95,
+        selection_profile="balanced_mcc",
+    )
+
+    assert set(summary["experiment"]) == expected
+    assert selected["experiment"] in expected
 
 
 def test_final_runner_requires_versioned_frozen_config(

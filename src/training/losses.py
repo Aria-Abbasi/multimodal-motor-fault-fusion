@@ -21,6 +21,7 @@ class LossConfig:
 
 LOSS_CONFIGS = {
     "ce_1.0": LossConfig("ce_1.0", early_weight=1.0),
+    "ce_1.25": LossConfig("ce_1.25", early_weight=1.25),
     "ce_1.5": LossConfig("ce_1.5", early_weight=1.5),
     "ce_2.0": LossConfig("ce_2.0", early_weight=2.0),
     "ce_3.0": LossConfig("ce_3.0", early_weight=3.0),

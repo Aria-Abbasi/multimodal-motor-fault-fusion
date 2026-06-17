@@ -10,12 +10,12 @@ from src.models.multimodal_cross_attention import MultimodalMotorModel
 from src.training.losses import LOSS_NAMES, build_health_loss
 
 
-def test_all_six_loss_configurations_are_finite() -> None:
+def test_all_supported_loss_configurations_are_finite() -> None:
     logits = torch.tensor([[0.2, 0.8], [0.8, 0.2]], requires_grad=True)
     targets = torch.tensor([1, 0])
     early_mask = torch.tensor([True, False])
 
-    assert len(LOSS_NAMES) == 6
+    assert len(LOSS_NAMES) == 7
     for name in LOSS_NAMES:
         loss = build_health_loss(name)(logits, targets, early_mask)
         assert loss.ndim == 0
@@ -37,7 +37,7 @@ def test_loss_grid_changes_values_and_gradients_on_mixed_batch() -> None:
 
     values = {}
     gradients = {}
-    for name in ("ce_1.0", "ce_4.0", "dynamic_focal"):
+    for name in ("ce_1.0", "ce_1.25", "ce_4.0", "dynamic_focal"):
         logits = base_logits.clone().requires_grad_(True)
         loss = build_health_loss(name)(logits, targets, early_mask)
         loss.backward()
@@ -45,7 +45,10 @@ def test_loss_grid_changes_values_and_gradients_on_mixed_batch() -> None:
         gradients[name] = logits.grad.detach().clone()
 
     assert values["ce_4.0"] > values["ce_1.0"]
+    assert values["ce_1.25"] > values["ce_1.0"]
+    assert values["ce_4.0"] > values["ce_1.25"]
     assert values["dynamic_focal"] != pytest.approx(values["ce_1.0"])
+    assert not torch.allclose(gradients["ce_1.0"], gradients["ce_1.25"])
     assert not torch.allclose(gradients["ce_1.0"], gradients["ce_4.0"])
     assert not torch.allclose(gradients["ce_1.0"], gradients["dynamic_focal"])
 

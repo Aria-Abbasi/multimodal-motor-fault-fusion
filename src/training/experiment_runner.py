@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.training.experiment_config import LOSS_NAMES
+from src.training.experiment_config import DEFAULT_LOSS_NAMES, LOSS_NAMES
 from src.training.train_multimodal import PIPELINE_VERSION
 
 
@@ -59,7 +59,7 @@ SUMMARY_METRICS = (
 
 
 def build_experiment_matrix(
-    losses: tuple[str, ...] = LOSS_NAMES,
+    losses: tuple[str, ...] = DEFAULT_LOSS_NAMES,
 ) -> list[dict[str, Any]]:
     """Return the 12 unique loss/gate configurations."""
     experiments = []
@@ -319,7 +319,7 @@ def run_protocol_matrix(args: argparse.Namespace, protocol: str) -> None:
     if args.smoke_test:
         seeds = seeds[:1]
 
-    requested_losses = tuple(args.losses) if args.losses else LOSS_NAMES
+    requested_losses = tuple(args.losses) if args.losses else DEFAULT_LOSS_NAMES
     if protocol_config["dataset"] == "paderborn":
         unsupported = set(requested_losses) - {"ce_1.0"}
         if args.losses and unsupported:
